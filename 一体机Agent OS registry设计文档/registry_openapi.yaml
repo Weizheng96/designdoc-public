@@ -1,0 +1,648 @@
+openapi: 3.0.3
+info:
+  title: 一体机 Agent OS 注册中心 API
+  version: 0.1.0
+  description: >
+    一体机场景下九问 Agent 注册中心的对外 REST API —— Agent（三方 / 九问）镜像与实例管理、
+    node 心跳、心跳租约、分布式高可用（后续版本）。本文件为设计文档
+    《一体机 Agent OS registry 设计文档》§3 场景逻辑视图各接口的**具体接口格式**的统一来源。
+
+
+    统一约定（对齐现有实现 backend/routers/dataset.py、heartbeat/router.py）：
+
+    - 路径：镜像 / 实例为**固定命名注册表**（/api/images、/api/instances，数据落「镜像注册表」「实例注册表」）；
+      node 心跳（节点级）、lease-config、ha 为全局。
+
+    - 响应体：回执 {…, status:"registered"|"updated"|"deregistered"} 或 {…, deleted:bool} 风格
+      （镜像 / 实例不分 dataset，回执不含 dataset 字段）。
+
+    - 错误：404 资源不存在、400 校验失败、403 越权、409 冲突（镜像在用）、502 外部依赖（元戎）失败。
+
+    - 传输：HTTP/1.1 + keep-alive 长连接（uvicorn timeout_keep_alive ≥ 心跳间隔）。
+
+servers:
+  - url: http://{host}:{port}
+    description: 单机 = 本机地址；分布式 = 经 nginx 转发到当前主（注册中心保持 nginx 指向主）
+    variables:
+      host:
+        default: "127.0.0.1"
+      port:
+        default: "8000"
+
+tags:
+  - name: images
+    description: 三方框架镜像 —— 注册 / 查询 / 注销（校验无在用实例）/ 默认版本
+  - name: instances
+    description: Agent 实例 —— 创建 / 查询 / 关闭（三方 / 九问统一，service_id 幂等）
+  - name: heartbeat
+    description: node 心跳（节点级）与心跳租约
+  - name: ha
+    description: 分布式高可用 —— 成员 / leader（后续版本）
+
+paths:
+  # ── 镜像 ──────────────────────────────────────────────────────────────
+  /api/images:
+    get:
+      tags: [images]
+      summary: 查询镜像（扁平列表，一条目 = 一个框架版本）
+      description: >
+        一条目 = 镜像注册表的一行（一个框架版本），返回扁平数组、不按框架分组。
+        排序 framework ASC → version_key DESC（新版本在前），同框架各版本因此相邻，
+        前端要「框架 → 版本」的树按 framework 就地 group 即可；框架的版本集可以跨页，
+        这是扁平分页的正常行为。
+        分页单位 = 行，故 X-Total-Count 是过滤后的版本行数。
+        筛选直接作用在行上、命中即返回该行，不存在框架级与行级字段不一致的歧义。
+      parameters:
+        - name: framework
+          in: query
+          required: false
+          schema: { type: string, example: opencode }
+        - name: uploaded_by
+          in: query
+          required: false
+          description: 按上传者筛选（九问预置条目为 system）
+          schema: { type: string, example: user-01 }
+        - $ref: '#/components/parameters/Size'
+        - $ref: '#/components/parameters/Page'
+      responses:
+        '200':
+          description: 镜像条目列表（扁平，一元素 = 一个框架版本）
+          headers:
+            X-Total-Count:
+              description: 过滤后的**框架版本行**总数；仅 size>0 时设置
+              schema: { type: integer, example: 12 }
+            X-Page: { $ref: '#/components/headers/XPage' }
+            X-Total-Pages: { $ref: '#/components/headers/XTotalPages' }
+            X-Page-Size: { $ref: '#/components/headers/XPageSize' }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ImageEntry' }
+    post:
+      tags: [images]
+      summary: 注册镜像（登记适配镜像引用 + 元戎运行规格）
+      description: 适配镜像由外部镜像处理模块产出、存入镜像仓后由其调用本接口登记引用 + 运行规格（注册中心不做适配）。同框架多次注册按 framework_version 合并。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterImageRequest' }
+      responses:
+        '200':
+          description: 已注册
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImageOpResponse' }
+              example: { framework: opencode, framework_version: v0.2.0, status: registered }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/images/{framework}/default:
+    parameters:
+      - $ref: '#/components/parameters/Framework'
+    put:
+      tags: [images]
+      summary: 设默认版本
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [framework_version]
+              properties:
+                framework_version: { type: string, example: v0.2.0 }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImageOpResponse' }
+              example: { framework: opencode, default: v0.2.0, status: updated }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/images/{framework}/launch-spec:
+    parameters:
+      - $ref: '#/components/parameters/Framework'
+    get:
+      tags: [images]
+      summary: 取框架运行规格（gateway 拉起前查询）
+      description: >
+        gateway 拉起实例前查此拿元戎运行规格（framework/framework_version + Docker 沙箱字段）；
+        不带 version 取默认版本。镜像管理据框架默认版本组合返回。
+      parameters:
+        - name: version
+          in: query
+          required: false
+          description: 缺省取默认版本
+          schema: { type: string, example: v0.2.0 }
+      responses:
+        '200':
+          description: 元戎运行规格
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LaunchSpec' }
+              example: { framework: opencode, framework_version: v0.2.0, imageurl: harbor.local/adapted/opencode:v0.2.0-mod1.3, cpu: 1000, memory: 2048, ports: [ { port: 8080, protocol: tcp } ], env: { A2X_LLM_KEY: "${A2X_LLM_KEY}" } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/images/{framework}/{version}:
+    parameters:
+      - $ref: '#/components/parameters/Framework'
+      - name: version
+        in: path
+        required: true
+        description: framework_version
+        schema: { type: string, example: v0.2.0 }
+    delete:
+      tags: [images]
+      summary: 注销镜像（校验无在用实例 → 删镜像仓文件 + 删条目）
+      responses:
+        '200':
+          description: 已注销
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImageOpResponse' }
+              example: { framework: opencode, framework_version: v0.2.0, status: deregistered }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/ImageInUse' }
+
+  # ── 实例 ──────────────────────────────────────────────────────────────
+  /api/instances:
+    get:
+      tags: [instances]
+      summary: 查询实例（派生 status；分页单位 = 实例）
+      description: >
+        按 framework 升序 → user 升序 → service_id 升序返回（service_id 为主键，兜底保证全序）。
+        status 派生自 node 心跳、不落库，故不参与排序。
+        过滤先于分页：先按筛选条件（含 include_unhealthy 决定的状态可见性）筛出全集再分页，
+        故 X-Total-Count 是过滤后的总数。
+      parameters:
+        - name: include_unhealthy
+          in: query
+          required: false
+          description: 默认 false 只回 运行；true 含 异常
+          schema: { type: boolean, default: false }
+        - name: node
+          in: query
+          required: false
+          schema: { type: string, example: 192.168.0.12 }
+        - name: framework
+          in: query
+          required: false
+          schema: { type: string, example: opencode }
+        - name: kind
+          in: query
+          required: false
+          schema: { type: string, enum: [三方, 九问] }
+        - name: user
+          in: query
+          required: false
+          description: 按用户 ID 查该用户的实例
+          schema: { type: string, example: user-01 }
+        - $ref: '#/components/parameters/Size'
+        - $ref: '#/components/parameters/Page'
+      responses:
+        '200':
+          description: 实例列表（status 为查询派生值）
+          headers:
+            X-Total-Count:
+              description: 过滤后的**实例**总数；仅 size>0 时设置
+              schema: { type: integer, example: 134 }
+            X-Page: { $ref: '#/components/headers/XPage' }
+            X-Total-Pages: { $ref: '#/components/headers/XTotalPages' }
+            X-Page-Size: { $ref: '#/components/headers/XPageSize' }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/InstanceEntry' }
+    post:
+      tags: [instances]
+      summary: 注册实例（三方 / 九问统一）
+      description: >
+        gateway 提供全部字段并注册（注册中心不调元戎）：经 GET …/launch-spec 拿运行规格、自行调元戎拉起后，
+        带 kind/framework/framework_version/node/address 确认注册。三方与九问同一套流程，
+        仅九问框架镜像注册表条目随一体机预置。service_id 幂等：重发即 upsert 覆盖。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterInstanceRequest' }
+            examples:
+              三方:
+                summary: 三方（镜像经镜像处理模块注册）
+                value:
+                  service_id: generic_3f9a1b2c
+                  kind: 三方
+                  framework: opencode
+                  framework_version: v0.2.0
+                  node: 192.168.0.12
+                  address: 10.244.1.7:4096
+                  user: user-01
+              九问:
+                summary: 九问（框架镜像预置，流程同三方）
+                value:
+                  service_id: generic_9c21d4e5
+                  kind: 九问
+                  framework: jiuwen-report
+                  framework_version: v1.0.0
+                  node: 192.168.0.11
+                  address: 10.244.2.3:8080
+                  user: user-02
+      responses:
+        '200':
+          description: 实例条目（含派生 status）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InstanceEntry' }
+              examples:
+                三方:
+                  value:
+                    service_id: generic_3f9a1b2c
+                    kind: 三方
+                    framework: opencode
+                    framework_version: v0.2.0
+                    address: 10.244.1.7:4096
+                    node: 192.168.0.12
+                    user: user-01
+                    created_at: "2026-07-06T10:00:00Z"
+                    last_active_at: "2026-07-06T10:00:00Z"
+                    status: 运行
+                九问:
+                  value:
+                    service_id: generic_9c21d4e5
+                    kind: 九问
+                    framework: jiuwen-report
+                    framework_version: v1.0.0
+                    address: 10.244.2.3:8080
+                    node: 192.168.0.11
+                    user: user-02
+                    created_at: "2026-07-06T09:30:00Z"
+                    last_active_at: "2026-07-06T09:30:00Z"
+                    status: 运行
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/instances/{service_id}:
+    parameters:
+      - name: service_id
+        in: path
+        required: true
+        schema: { type: string, example: generic_3f9a1b2c }
+    patch:
+      tags: [instances]
+      summary: 变更实例（node / address 改变时更新）
+      description: gateway 在实例落点变化（元戎迁移、node/address 改变）时更新条目；service_id 不变。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateInstanceRequest' }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InstanceEntry' }
+              example: { service_id: generic_3f9a1b2c, kind: 三方, framework: opencode, framework_version: v0.2.0, address: 10.244.3.9:4096, node: 192.168.0.20, user: user-01, status: 运行 }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [instances]
+      summary: 注销实例（删注册条目；元戎停止由 gateway 完成）
+      responses:
+        '200':
+          description: 已删除（幂等：已删则 deleted=false）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InstanceDeleteResponse' }
+              example: { service_id: generic_3f9a1b2c, deleted: true }
+
+  # ── 心跳 ──────────────────────────────────────────────────────────────
+  /api/nodes/{node}/heartbeat:
+    parameters:
+      - name: node
+        in: path
+        required: true
+        description: 本机 nodeIP（节点级：一次覆盖其上全部实例）
+        schema: { type: string, example: 192.168.0.12 }
+    post:
+      tags: [heartbeat]
+      summary: node 心跳续租
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { type: string, nullable: true, description: 可选透传 }
+      responses:
+        '200':
+          description: 租约已续
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NodeHeartbeatResponse' }
+              example: { node: 192.168.0.12, state: healthy, ttl_seconds: 90, expires_at: 1751800000.0 }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/lease-config:
+    get:
+      tags: [heartbeat]
+      summary: 读心跳租约策略
+      responses:
+        '200':
+          description: 租约配置
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LeaseConfigResponse' }
+              example: { enabled: true, min_ttl: 10, max_ttl: 3600, grace_period: 30 }
+    post:
+      tags: [heartbeat]
+      summary: 设心跳租约策略
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LeaseConfig' }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LeaseConfigResponse' }
+
+  # ── 分布式高可用（后续版本）──────────────────────────────────────────
+  /api/ha/members:
+    get:
+      tags: [ha]
+      summary: '[后续版本] 当前成员列表'
+      responses:
+        '200':
+          description: 成员
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HAMembers' }
+              example: { members: [192.168.0.11, 192.168.0.12, 192.168.0.13] }
+    post:
+      tags: [ha]
+      summary: '[后续版本] 变更成员集（奇偶校验，偶数去尾 + 告警）'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [members]
+              properties:
+                members:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200':
+          description: 生效成员集
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HAMembers' }
+              example: { members: [192.168.0.11], warning: "偶数台，未激活 192.168.0.12" }
+
+  /api/ha/leader:
+    get:
+      tags: [ha]
+      summary: '[后续版本] 当前主（leader）地址 —— 客户端发现用'
+      description: 返回当前主地址（任一节点据 Raft 权威回主）；注册中心据此把 nginx 指向主，gateway 不直接调用。
+      responses:
+        '200':
+          description: leader
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HALeader' }
+              example: { leader: 192.168.0.11 }
+
+components:
+  parameters:
+    Framework:
+      name: framework
+      in: path
+      required: true
+      schema: { type: string, example: opencode }
+    # 分页参数 —— 与通用服务列表 GET /api/datasets/{dataset}/services 完全一致（见 https://github.com/Weizheng96/A2X-registry/blob/main/docs/backend_api.md）
+    Size:
+      name: size
+      in: query
+      required: false
+      description: 分页大小；-1 返回全部（不分页）。保留参数，不参与筛选
+      schema: { type: integer, default: -1, minimum: -1, example: 20 }
+    Page:
+      name: page
+      in: query
+      required: false
+      description: 页码（从 1 开始），仅 size>0 时生效。保留参数，不参与筛选
+      schema: { type: integer, default: 1, minimum: 1, example: 2 }
+
+  headers:
+    XTotalCount:
+      description: 匹配总数；仅 size>0 时设置
+      schema: { type: integer }
+    XPage:
+      description: 当前页码（从 1 开始）；仅 size>0 时设置
+      schema: { type: integer, example: 2 }
+    XTotalPages:
+      description: 总页数 = max(1, ceil(X-Total-Count / X-Page-Size))；空结果集时为 1 而非 0。仅 size>0 时设置
+      schema: { type: integer, minimum: 1, example: 4 }
+    XPageSize:
+      description: 当前页大小；仅 size>0 时设置
+      schema: { type: integer, example: 20 }
+
+  responses:
+    BadRequest:
+      description: 校验失败
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { detail: "spec.imageurl 缺失" }
+    NotFound:
+      description: 资源不存在
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    ImageInUse:
+      description: 镜像仍有在用实例，拒绝注销
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ImageInUseError' }
+          example: { code: image_in_use, detail: "2 个实例仍在用", instances: [inst_3f9a, inst_5b2c] }
+
+  schemas:
+    # ── 镜像运行规格（元戎 Docker 沙箱）──
+    Mount:
+      type: object
+      required: [source, target]
+      properties:
+        source: { type: string, example: /data/agent }
+        target: { type: string, example: /data }
+        readonly: { type: boolean, default: false }
+    Port:
+      type: object
+      required: [port]
+      properties:
+        port: { type: integer, example: 8080 }
+        protocol: { type: string, example: tcp }
+    ImageSpec:
+      type: object
+      required: [imageurl]
+      description: >
+        元戎 Docker 沙箱运行规格，**扁平**——镜像注册表一行 = 一个框架版本，故不再包 rootfs 层。
+        调元戎时由适配层重新组装成其 API 要求的 rootfs 嵌套结构（type 恒为 image）。
+      properties:
+        imageurl: { type: string, example: harbor.local/adapted/opencode:v0.2.0-mod1.3 }
+        workdir: { type: string, example: /app }
+        mounts:
+          type: array
+          items: { $ref: '#/components/schemas/Mount' }
+        cpu: { type: integer, description: 毫核, example: 1000 }
+        memory: { type: integer, description: MB, example: 2048 }
+        ports:
+          type: array
+          items: { $ref: '#/components/schemas/Port' }
+        env:
+          type: object
+          additionalProperties: { type: string }
+          example: { A2X_LLM_KEY: "${A2X_LLM_KEY}" }
+        image_module_version: { type: string, example: v1.3 }
+
+    # ── 镜像请求 / 条目 / 回执 ──
+    RegisterImageRequest:
+      type: object
+      required: [framework, framework_version, spec, uploaded_by]
+      properties:
+        framework: { type: string, example: opencode }
+        framework_version: { type: string, example: v0.2.0 }
+        spec: { $ref: '#/components/schemas/ImageSpec' }
+        uploaded_by: { type: string, example: user-01 }
+    ImageEntry:
+      type: object
+      description: >
+        一条目 = 一个框架版本，即镜像注册表的**一行**（§4.2）。扁平——不按框架分组、无 versions 嵌套、
+        无框架级 default 字段；framework 与 is_default 都是行上的普通字段。
+      properties:
+        framework: { type: string, example: opencode }
+        framework_version: { type: string, example: v0.2.0 }
+        is_default: { type: boolean, description: 该行是否为其框架的默认版本；不参与排序, example: true }
+        image_module_version: { type: string, example: v1.3 }
+        imageurl: { type: string, example: harbor.local/adapted/opencode:v0.2.0-mod1.3 }
+        workdir: { type: string, example: /app }
+        mounts: { type: array, items: { $ref: '#/components/schemas/Mount' } }
+        cpu: { type: integer, description: 毫核, example: 1000 }
+        memory: { type: integer, description: MB, example: 2048 }
+        ports: { type: array, items: { $ref: '#/components/schemas/Port' } }
+        env: { type: object, additionalProperties: { type: string } }
+        uploaded_by: { type: string, example: user-01 }
+        created_at: { type: string, format: date-time, example: "2026-07-06T10:00:00Z" }
+    ImageOpResponse:
+      type: object
+      description: 镜像操作回执（RegisterResponse 风格）
+      properties:
+        framework: { type: string }
+        framework_version: { type: string }
+        default: { type: string }
+        status: { type: string, enum: [registered, updated, deregistered] }
+
+    # ── 镜像运行规格（GET …/launch-spec 响应）──
+    LaunchSpec:
+      type: object
+      description: 元戎运行规格（framework/framework_version + Docker 沙箱字段），供 gateway 拉起
+      properties:
+        framework: { type: string, example: opencode }
+        framework_version: { type: string, example: v0.2.0 }
+        imageurl: { type: string, example: harbor.local/adapted/opencode:v0.2.0-mod1.3 }
+        workdir: { type: string, example: /app }
+        mounts: { type: array, items: { $ref: '#/components/schemas/Mount' } }
+        cpu: { type: integer, example: 1000 }
+        memory: { type: integer, example: 2048 }
+        ports: { type: array, items: { $ref: '#/components/schemas/Port' } }
+        env: { type: object, additionalProperties: { type: string } }
+
+    # ── 实例请求 / 条目 / 回执 ──
+    UpdateInstanceRequest:
+      type: object
+      description: 实例变更（gateway 在 node/address 改变时更新；service_id 不变）
+      properties:
+        node: { type: string, description: 新落点 nodeIP, example: 192.168.0.20 }
+        address: { type: string, description: 新访问地址, example: 10.244.3.9:4096 }
+    RegisterInstanceRequest:
+      type: object
+      required: [service_id, kind, framework, framework_version, node, address, user]
+      description: 实例注册（三方 / 九问统一：gateway 经 GET …/launch-spec 拿规格、自行调元戎拉起后带落点注册）。
+      properties:
+        service_id: { type: string, description: user+framework 派生（幂等）, example: generic_3f9a1b2c }
+        kind: { type: string, enum: [三方, 九问], example: 三方 }
+        framework: { type: string, example: opencode }
+        framework_version: { type: string, example: v0.2.0 }
+        node: { type: string, description: 元戎落点 nodeIP, example: 192.168.0.12 }
+        address: { type: string, description: 实例访问地址, example: 10.244.1.7:4096 }
+        user: { type: string, description: 创建 / 所属用户, example: user-01 }
+    InstanceEntry:
+      type: object
+      description: 实例注册条目；status 为查询派生的生命周期值（运行 / 异常），不落库
+      properties:
+        service_id: { type: string }
+        kind: { type: string, enum: [三方, 九问] }
+        framework: { type: string, example: opencode }
+        framework_version: { type: string, example: v0.2.0 }
+        address: { type: string, description: 实例自身访问地址 }
+        node: { type: string, description: 元戎 nodeIP（落点节点）}
+        user: { type: string }
+        created_at: { type: string, format: date-time }
+        last_active_at: { type: string, format: date-time }
+        status: { type: string, enum: [运行, 异常] }
+    InstanceDeleteResponse:
+      type: object
+      properties:
+        service_id: { type: string }
+        deleted: { type: boolean }
+
+    # ── 心跳 ──
+    NodeHeartbeatResponse:
+      type: object
+      properties:
+        node: { type: string }
+        state: { type: string, enum: [healthy, unhealthy] }
+        ttl_seconds: { type: integer, example: 90 }
+        expires_at: { type: number, format: double, description: unix 秒 }
+    LeaseConfig:
+      type: object
+      required: [enabled, min_ttl, max_ttl, grace_period]
+      properties:
+        enabled: { type: boolean, example: true }
+        min_ttl: { type: integer, example: 10 }
+        max_ttl: { type: integer, example: 3600 }
+        grace_period: { type: integer, example: 30 }
+    LeaseConfigResponse:
+      allOf:
+        - $ref: '#/components/schemas/LeaseConfig'
+
+    # ── HA ──
+    HAMembers:
+      type: object
+      properties:
+        members:
+          type: array
+          items: { type: string }
+        warning: { type: string }
+    HALeader:
+      type: object
+      properties:
+        leader: { type: string, example: 192.168.0.11 }
+
+    # ── 错误 ──
+    Error:
+      type: object
+      properties:
+        detail: { type: string }
+    ImageInUseError:
+      type: object
+      properties:
+        code: { type: string, example: image_in_use }
+        detail: { type: string }
+        instances:
+          type: array
+          items: { type: string }
