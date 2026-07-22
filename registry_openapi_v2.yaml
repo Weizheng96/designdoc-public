@@ -142,7 +142,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/LaunchSpec' }
-              example: { framework: opencode, framework_version: v0.2.0, rootfs: { imageurl: harbor.local/adapted/opencode:v0.2.0-mod1.3 }, cpu: 1000, memory: 2048, ports: [ { port: 8080, protocol: tcp } ], env: { A2X_LLM_KEY: "${A2X_LLM_KEY}" } }
+              example: { framework: opencode, framework_version: v0.2.0, runtime: python3.11, sandbox_type: docker, rootfs: { imageurl: harbor.local/adapted/opencode:v0.2.0-mod1.3 }, cpu: 1000, memory: 2048, ports: [ { port: 8080, protocol: tcp } ], env_vars: { A2X_LLM_KEY: "${A2X_LLM_KEY}" }, image_module_version: v1.3 }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /api/images/{framework}/{version}:
@@ -520,7 +520,7 @@ components:
         ports:
           type: array
           items: { $ref: '#/components/schemas/Port' }
-        env:
+        env_vars:
           type: object
           additionalProperties: { type: string }
           example: { A2X_LLM_KEY: "${A2X_LLM_KEY}" }
@@ -551,7 +551,7 @@ components:
         cpu: { type: integer, description: 毫核, example: 1000 }
         memory: { type: integer, description: MB, example: 2048 }
         ports: { type: array, items: { $ref: '#/components/schemas/Port' } }
-        env: { type: object, additionalProperties: { type: string } }
+        env_vars: { type: object, additionalProperties: { type: string } }
         uploaded_by: { type: string, example: user-01 }
         created_at: { type: string, format: date-time, example: "2026-07-06T10:00:00Z" }
     ImageOpResponse:
@@ -566,10 +566,22 @@ components:
     # ── 镜像运行规格（GET …/launch-spec 响应）──
     LaunchSpec:
       type: object
-      description: 元戎运行规格（framework/framework_version + rootfs + 资源字段），供 gateway 拉起
+      description: >
+        元戎运行规格（framework/framework_version + runtime_spec 字段），供 gateway 拉起。
+        结构与 ImageSpec 一致（runtime/sandbox_type/rootfs/cpu/memory/ports/env_vars/image_module_version），
+        外加 framework/framework_version 标识。
       properties:
         framework: { type: string, example: opencode }
         framework_version: { type: string, example: v0.2.0 }
+        runtime:
+          type: string
+          description: '运行时类型（同 ImageSpec.runtime）'
+          example: python3.11
+        sandbox_type:
+          type: string
+          enum: [docker, supervisor, ""]
+          description: '沙箱类型（同 ImageSpec.sandbox_type）'
+          example: docker
         rootfs:
           type: object
           properties:
@@ -579,7 +591,8 @@ components:
         cpu: { type: integer, example: 1000 }
         memory: { type: integer, example: 2048 }
         ports: { type: array, items: { $ref: '#/components/schemas/Port' } }
-        env: { type: object, additionalProperties: { type: string } }
+        env_vars: { type: object, additionalProperties: { type: string }, example: { A2X_LLM_KEY: "${A2X_LLM_KEY}" } }
+        image_module_version: { type: string, example: v1.3 }
 
     # ── 实例请求 / 条目 / 回执 ──
     UpdateInstanceRequest:
