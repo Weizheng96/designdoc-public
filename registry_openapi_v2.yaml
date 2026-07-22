@@ -142,7 +142,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/LaunchSpec' }
-              example: { framework: opencode, framework_version: v0.2.0, runtime: python3.11, sandbox_type: docker, rootfs: { imageurl: harbor.local/adapted/opencode:v0.2.0-mod1.3 }, cpu: 1000, memory: 2048, ports: [ { port: 8080, protocol: tcp } ], env_vars: { A2X_LLM_KEY: "${A2X_LLM_KEY}" }, image_module_version: v1.3 }
+              example: { framework: opencode, framework_version: v0.2.0, runtime_spec: { imageurl: harbor.local/adapted/opencode:v0.2.0-mod1.3, cpu: 1000, memory: 2048, ports: [ { port: 8080, protocol: tcp } ] }, env_vars: { A2X_LLM_KEY: "${A2X_LLM_KEY}" } }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /api/images/{framework}/{version}:
@@ -458,7 +458,7 @@ components:
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
-          example: { detail: "runtime_spec.rootfs.imageurl 缺失" }
+          example: { detail: "spec.imageurl 缺失" }
     NotFound:
       description: 资源不存在
       content:
@@ -488,39 +488,22 @@ components:
         protocol: { type: string, example: tcp }
     ImageSpec:
       type: object
-      required: [runtime, rootfs]
+      required: [imageurl]
       description: >
-        元戎运行规格（RuntimeSpec），与元戎 inline 模式的 runtime_spec 类型一致。
-        rootfs 包装层保留，与元戎 API 的 RootfsSpec 对齐。
-        runtime、rootfs 必填；rootfs.imageurl 必填；其余选填。
+        元戎 Docker 沙箱运行规格，**扁平**——镜像注册表一行 = 一个框架版本，故不再包 rootfs 层。
+        调元戎时由适配层重新组装成其 API 要求的 rootfs 嵌套结构（type 恒为 image）。
       properties:
-        runtime:
-          type: string
-          description: '运行时类型，枚举：python3.6/3.7/3.8/3.9/3.10/3.11、go/http/custom image、java8/java11/java17/java21、posix-custom-runtime；未知值 fallback PosixCustom'
-          example: python3.11
-        sandbox_type:
-          type: string
-          enum: [docker, supervisor, ""]
-          description: '沙箱类型：docker->DockerExecutor、supervisor->SupervisorExecutor、空->默认 RuntimeExecutor'
-          example: docker
-        rootfs:
-          type: object
-          required: [imageurl]
-          description: 容器 rootfs 配置（对应元戎 RootfsSpec）
-          properties:
-            imageurl: { type: string, example: harbor.local/adapted/opencode:v0.2.0-mod1.3 }
-            user: { type: string, description: 容器内用户名, example: agentos }
-            ports:
-              type: array
-              description: '格式 [<proto>:]<port>，如 ["tcp:22"]、["8080"]'
-              items: { type: string }
-              example: ["tcp:8080"]
+        imageurl: { type: string, example: harbor.local/adapted/opencode:v0.2.0-mod1.3 }
+        workdir: { type: string, example: /app }
+        mounts:
+          type: array
+          items: { $ref: '#/components/schemas/Mount' }
         cpu: { type: integer, description: 毫核, example: 1000 }
         memory: { type: integer, description: MB, example: 2048 }
         ports:
           type: array
           items: { $ref: '#/components/schemas/Port' }
-        env_vars:
+        env:
           type: object
           additionalProperties: { type: string }
           example: { A2X_LLM_KEY: "${A2X_LLM_KEY}" }
@@ -533,7 +516,15 @@ components:
       properties:
         framework: { type: string, example: opencode }
         framework_version: { type: string, example: v0.2.0 }
-        runtime_spec: { $ref: '#/components/schemas/ImageSpec' }
+        runtime_spec:
+          type: object
+          additionalProperties: true
+          description: 运行规格（元戎 Docker 沙箱），作为不透明 JSON 对象透传，不关心具体字段
+        env_vars:
+          type: object
+          additionalProperties: { type: string }
+          description: 环境变量（原 spec.env 提升而来）
+          example: { A2X_LLM_KEY: "${A2X_LLM_KEY}" }
         uploaded_by: { type: string, example: user-01 }
     ImageEntry:
       type: object
@@ -551,7 +542,7 @@ components:
         cpu: { type: integer, description: 毫核, example: 1000 }
         memory: { type: integer, description: MB, example: 2048 }
         ports: { type: array, items: { $ref: '#/components/schemas/Port' } }
-        env_vars: { type: object, additionalProperties: { type: string } }
+        env: { type: object, additionalProperties: { type: string } }
         uploaded_by: { type: string, example: user-01 }
         created_at: { type: string, format: date-time, example: "2026-07-06T10:00:00Z" }
     ImageOpResponse:
@@ -566,33 +557,18 @@ components:
     # ── 镜像运行规格（GET …/launch-spec 响应）──
     LaunchSpec:
       type: object
-      description: >
-        元戎运行规格（framework/framework_version + runtime_spec 字段），供 gateway 拉起。
-        结构与 ImageSpec 一致（runtime/sandbox_type/rootfs/cpu/memory/ports/env_vars/image_module_version），
-        外加 framework/framework_version 标识。
+      description: 元戎运行规格（framework/framework_version + runtime_spec + env_vars），供 gateway 拉起
       properties:
         framework: { type: string, example: opencode }
         framework_version: { type: string, example: v0.2.0 }
-        runtime:
-          type: string
-          description: '运行时类型（同 ImageSpec.runtime）'
-          example: python3.11
-        sandbox_type:
-          type: string
-          enum: [docker, supervisor, ""]
-          description: '沙箱类型（同 ImageSpec.sandbox_type）'
-          example: docker
-        rootfs:
+        runtime_spec:
           type: object
-          properties:
-            imageurl: { type: string, example: harbor.local/adapted/opencode:v0.2.0-mod1.3 }
-            user: { type: string, example: agentos }
-            ports: { type: array, items: { type: string }, example: ["tcp:8080"] }
-        cpu: { type: integer, example: 1000 }
-        memory: { type: integer, example: 2048 }
-        ports: { type: array, items: { $ref: '#/components/schemas/Port' } }
-        env_vars: { type: object, additionalProperties: { type: string }, example: { A2X_LLM_KEY: "${A2X_LLM_KEY}" } }
-        image_module_version: { type: string, example: v1.3 }
+          additionalProperties: true
+          description: 运行规格（元戎 Docker 沙箱），作为不透明 JSON 对象透传，不关心具体字段
+        env_vars:
+          type: object
+          additionalProperties: { type: string }
+          example: { A2X_LLM_KEY: "${A2X_LLM_KEY}" }
 
     # ── 实例请求 / 条目 / 回执 ──
     UpdateInstanceRequest:
