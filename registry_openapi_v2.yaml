@@ -483,6 +483,8 @@ components:
     Port:
       type: object
       required: [port]
+      description: >
+        此模型先前仅在ImageSpec中被使用，现在已不再使用
       properties:
         port: { type: integer, example: 8080 }
         protocol: { type: string, example: tcp }
@@ -490,11 +492,12 @@ components:
       type: object
       required: [imageurl]
       description: >
+        此模型已不再使用，spec改为透传 JSON 对象。
         元戎 Docker 沙箱运行规格，**扁平**——镜像注册表一行 = 一个框架版本，故不再包 rootfs 层。
         调元戎时由适配层重新组装成其 API 要求的 rootfs 嵌套结构（type 恒为 image）。
       properties:
         imageurl: { type: string, example: harbor.local/adapted/opencode:v0.2.0-mod1.3 }
-        workdir: { type: string, example: /app }
+        workspace: { type: string, example: /app }
         mounts:
           type: array
           items: { $ref: '#/components/schemas/Mount' }
@@ -523,8 +526,11 @@ components:
         env_vars:
           type: object
           additionalProperties: { type: string }
-          description: 环境变量（原 spec.env 提升而来）
+          description: 环境变量
           example: { A2X_LLM_KEY: "${A2X_LLM_KEY}" }
+        image_module_version: { type: string, example: v1.3 }
+        workspace: { type: string, example: /app }
+        mounts: { type: array, items: { $ref: '#/components/schemas/Mount' } }
         uploaded_by: { type: string, example: user-01 }
     ImageEntry:
       type: object
@@ -535,14 +541,18 @@ components:
         framework: { type: string, example: opencode }
         framework_version: { type: string, example: v0.2.0 }
         is_default: { type: boolean, description: 该行是否为其框架的默认版本；不参与排序, example: true }
+        runtime_spec:
+          type: object
+          additionalProperties: true
+          description: 运行规格（元戎 Docker 沙箱），作为不透明 JSON 对象透传，不关心具体字段
+        env_vars:
+          type: object
+          additionalProperties: { type: string }
+          description: 环境变量
+          example: { A2X_LLM_KEY: "${A2X_LLM_KEY}" }
         image_module_version: { type: string, example: v1.3 }
-        imageurl: { type: string, example: harbor.local/adapted/opencode:v0.2.0-mod1.3 }
-        workdir: { type: string, example: /app }
+        workspace: { type: string, example: /app }
         mounts: { type: array, items: { $ref: '#/components/schemas/Mount' } }
-        cpu: { type: integer, description: 毫核, example: 1000 }
-        memory: { type: integer, description: MB, example: 2048 }
-        ports: { type: array, items: { $ref: '#/components/schemas/Port' } }
-        env: { type: object, additionalProperties: { type: string } }
         uploaded_by: { type: string, example: user-01 }
         created_at: { type: string, format: date-time, example: "2026-07-06T10:00:00Z" }
     ImageOpResponse:
@@ -569,6 +579,9 @@ components:
           type: object
           additionalProperties: { type: string }
           example: { A2X_LLM_KEY: "${A2X_LLM_KEY}" }
+        image_module_version: { type: string, example: v1.3 }
+        workspace: { type: string, example: /app }
+        mounts: { type: array, items: { $ref: '#/components/schemas/Mount' } }
 
     # ── 实例请求 / 条目 / 回执 ──
     UpdateInstanceRequest:
