@@ -55,7 +55,9 @@ MODULES=("jiuwenbox" "yuanrong" "agentregistry" "jiuwenswarm")
 
 ### 2.3 实现 `deploy/agentregistry/module.sh`（4 个钩子）
 
-两个服务各由 **systemd** 托管：`rqlite.service`（存储）+ `a2x-registry.service`（注册中心）。模块目录随包携带两个静态文件：unit 模板 `a2x-registry.service` 与配置模板 `registry.env`（rqlite 用其 rpm 自带 unit）。注册中心 unit 声明 `After=rqlite.service` / `Requires=rqlite.service`，启动顺序交给 systemd。各钩子按需取用 agentos 全局量（`AGENTOS_ROOT`、`YR_PYTHON_VERSION`）与 `registry.env`，均不消费 `--hosts`；启停走 `systemctl`。
+两个服务各由 **systemd** 托管：`rqlite.service`（存储）+ `a2x-registry.service`（注册中心）。模块目录随包携带 unit 模板 `a2x-registry.service`（rqlite 用其 rpm 自带 unit）。注册中心 unit 声明 `After=rqlite.service` / `Requires=rqlite.service`，启动顺序交给 systemd。
+
+> **配置方式**：注册中心 backend **不读 `registry.env` 配置文件**，配置一律走环境变量。故 `up` 钩子**在脚本中现算 BIND、现设 `A2X_REGISTRY_*` 环境变量并注入服务**（下方 2.3.2），而非维护一个 registry.env 文件。各钩子按需取用 agentos 全局量（`AGENTOS_ROOT`、`YR_PYTHON_VERSION`、`CLUSTER_HOSTS`）。
 
 `a2x-registry.service` 关键字段：
 
@@ -64,7 +66,7 @@ MODULES=("jiuwenbox" "yuanrong" "agentregistry" "jiuwenswarm")
 After=rqlite.service
 Requires=rqlite.service
 [Service]
-EnvironmentFile=/etc/a2x-registry/registry.env      # 配置唯一来源
+# 环境变量由 up 钩子现算现设并注入（脚本生成 systemd drop-in，非 registry.env 文件）
 ExecStart=/usr/bin/a2x-registry                      # 或 python3.11 -m a2x_registry.backend
 Restart=on-failure                                   # 异常退出自动重启
 RestartSec=3                                         # 重启前退避 3s
@@ -79,13 +81,17 @@ WantedBy=multi-user.target
 #### 2.3.1 `agentregistry_install`
 
 - **输入**：`AGENTOS_ROOT`（whl / rpm 所在目录）、`YR_PYTHON_VERSION`。
-- **流程**：① 从 `AGENTOS_ROOT` 装 rqlite rpm（`dnf install -y ./rqlite-*.rpm`，**系统级**）；② 系统级装注册中心 wheel（`pip install ./a2x_registry-*.whl`，使 `ExecStart` 路径稳定）；③ 拷 `a2x-registry.service` 到 `/etc/systemd/system/`、生成 `/etc/a2x-registry/registry.env`（已存在则不覆盖）；④ `systemctl daemon-reload`。
-- **默认配置**：安装源恒为 `AGENTOS_ROOT` 本地文件（离线）；unit 装在 `/etc/systemd/system/`，配置在 `/etc/a2x-registry/registry.env`。
+- **流程**：① 从 `AGENTOS_ROOT` 装 rqlite rpm（`dnf install -y ./rqlite-*.rpm`，**系统级**）；② 系统级装注册中心 wheel（`pip install ./a2x_registry-*.whl`，使 `ExecStart` 路径稳定）；③ 拷 `a2x-registry.service` 到 `/etc/systemd/system/`；④ `systemctl daemon-reload`。
+- **默认配置**：安装源恒为 `AGENTOS_ROOT` 本地文件（离线）；unit 装在 `/etc/systemd/system/`。运行配置不在此步，改由 `up` 钩子现设环境变量（见 2.3.2）。
 
 #### 2.3.2 `agentregistry_up`
 
-- **输入**：`registry.env`（systemd `EnvironmentFile`，字段见下）。
-- **流程**：① `systemctl enable --now a2x-registry`——因 `Requires=rqlite.service`，systemd **自动先起 rqlite** 再起注册中心，且 `enable` 使其开机自启；② curl 健康检查 `GET /api/datasets` 就绪后返回（`systemctl start` 不等 uvicorn 真就绪，故仍需探测）。
+- **输入**：`CLUSTER_HOSTS`（agentos 透传的 `--hosts`）；未给则自动探测本机 IP。
+- **流程**：
+  1. **解析监听地址 `BIND`**：`--hosts` 给了 → 取第一个 IP（`CLUSTER_HOSTS` 首个，如 `./agentos.sh up --hosts 192.168.1.1,192.168.1.2` → `192.168.1.1`）；未给 → 同其它模块，用 `hostname -I` 的**第一个非 `127.0.0.1`** IP。
+  2. **在脚本中现设环境变量**：把 `BIND` 与默认 `A2X_REGISTRY_PORT` / `MODE` / `DB_KIND` / `DB_ENDPOINT` 组成 `A2X_REGISTRY_*` **环境变量注入 systemd 服务**（脚本生成 drop-in，**不写 registry.env 文件**）。
+  3. `systemctl enable --now a2x-registry`——因 `Requires=rqlite.service`，systemd **自动先起 rqlite** 再起注册中心，`enable` 使其开机自启。
+  4. curl 健康检查 `GET /api/datasets` 就绪后返回（`systemctl start` 不等 uvicorn 真就绪，故仍需探测）。
 - **默认端口**（两个服务，均与其它模块**不冲突**）：
 
   | 服务 | 端口 | 默认绑定 | 备注 |
@@ -96,11 +102,11 @@ WantedBy=multi-user.target
 
   > 现有占用：yuanrong `31182`/`8888`、jiuwenswarm `8888`。`8000`/`4001`/`4002` 均空闲。
 
-- **默认配置**（`registry.env` 字段，backend 无 `--host`，全由此驱动）：
+- **默认配置**（由 `up` 钩子在脚本中设置为环境变量，backend 无 `--host`、不读配置文件）：
 
   | 变量 | 默认 | 说明 |
   |------|------|------|
-  | `A2X_REGISTRY_BIND` | 本机网卡 IP | 禁 `0.0.0.0` |
+  | `A2X_REGISTRY_BIND` | `--hosts` 首个 IP；未给则 `hostname -I` 首个非 `127.0.0.1` | 禁 `0.0.0.0` |
   | `A2X_REGISTRY_PORT` | `8000` | backend 端口 |
   | `A2X_REGISTRY_MODE` | `appliance` | 建镜像/实例表 |
   | `A2X_REGISTRY_DB_KIND` | `rqlite` | 存储后端 |
