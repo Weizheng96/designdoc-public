@@ -1,8 +1,6 @@
 # Gateway 与注册中心 一主多备 + VIP 高可用设计方案与开发计划
 
-> 版本：v0.1
-> 状态：设计方案（待评审）
-> 适用范围：jiuwenswarm Gateway、A2X 注册中心（agent-registry，代码路径目录名 `agent-gateway`，实际为注册中心）
+> 适用范围：jiuwenswarm Gateway、A2X 注册中心
 
 ---
 
