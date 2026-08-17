@@ -708,7 +708,7 @@ build.sh（构建机，联网）                       agentos.sh（目标机）
 
 #### 3.3.6 存储后端（rqlite 默认，etcd 可选·规划）
 
-默认存储恒为 rqlite（本文全篇形态）。为一体机复用元戎 etcd，规划一个**可选 etcd 后端**：把 image / instance 用到的表操作抽象为 `TableRepo` 接口（依赖倒置），rqlite 与 etcd 各实现，按 `A2X_REGISTRY_DB_KIND` 选择。etcd 仅实现一体机所需的行级 CRUD，分页 / 筛选等**未实现的统一 `raise NotImplementedError`**；key 前缀隔离、证书驱动的可选 mTLS。详见 [`ETCD兼容分析.md`](./ETCD兼容分析.md)。**是否落地待定。**
+默认存储恒为 rqlite（本文全篇形态）。为一体机复用元戎 etcd，规划一个**可选 etcd 后端**：把 image / instance 用到的表操作抽象为 `TableRepo` 接口（依赖倒置，8 个原语），rqlite 与 etcd 各实现，按 `A2X_REGISTRY_DB_KIND` 选择。**两后端行为一致**（etcd 全实现，含分页 / 筛选）；组合逻辑（`set_default` 等）收在 service 层。隔离用 key 前缀（**无 RBAC**），传输用证书驱动的可选 mTLS。详见 [`ETCD兼容分析.md`](./ETCD兼容分析.md)。**是否落地待定。**
 
 ---
 
