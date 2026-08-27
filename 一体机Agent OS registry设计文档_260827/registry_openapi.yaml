@@ -41,25 +41,18 @@ paths:
   /api/images:
     get:
       tags: [images]
-      summary: 查询镜像（扁平列表，一条目 = 一个 name 的一个版本）
+      summary: 查询镜像（扁平列表，一条目 = 一个框架版本）
       description: >
-        一条目 = 镜像注册表的一行（一个 name 的一个 version），返回扁平数组、不按 name 分组。
-        排序 name ASC → version_key DESC（新版本在前），同 name 各版本因此相邻，
-        前端要「name → 版本」的树按 name 就地 group 即可；一个 name 的版本集可以跨页，
+        一条目 = 镜像注册表的一行（一个框架版本），返回扁平数组、不按框架分组。
+        排序 framework ASC → version_key DESC（新版本在前），同框架各版本因此相邻，
+        前端要「框架 → 版本」的树按 framework 就地 group 即可；框架的版本集可以跨页，
         这是扁平分页的正常行为。
         分页单位 = 行，故 X-Total-Count 是过滤后的版本行数。
-        筛选直接作用在行上、命中即返回该行，不存在 name 级与行级字段不一致的歧义。
-        （framework 已降级为普通展示字段，仍可按其筛选。）
+        筛选直接作用在行上、命中即返回该行，不存在框架级与行级字段不一致的歧义。
       parameters:
-        - name: name
-          in: query
-          required: false
-          description: 按镜像主键 name 筛选
-          schema: { type: string, example: openclaw }
         - name: framework
           in: query
           required: false
-          description: 按 framework 展示字段筛选（非主键）
           schema: { type: string, example: opencode }
         - name: uploaded_by
           in: query
@@ -86,7 +79,7 @@ paths:
     post:
       tags: [images]
       summary: 注册镜像（登记适配镜像引用 + 元戎运行规格）
-      description: 适配镜像由外部镜像处理模块产出、存入镜像仓后由其调用本接口登记引用 + 运行规格（注册中心不做适配）。同一 name 多次注册按 version 合并。
+      description: 适配镜像由外部镜像处理模块产出、存入镜像仓后由其调用本接口登记引用 + 运行规格（注册中心不做适配）。同框架多次注册按 framework_version 合并。
       requestBody:
         required: true
         content:
@@ -98,47 +91,47 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ImageOpResponse' }
-              example: { name: openclaw, framework: openclaw, version: v0.2.0, status: registered }
+              example: { framework: opencode, framework_version: v0.2.0, status: registered }
         '400': { $ref: '#/components/responses/BadRequest' }
 
-  /api/images/{name}/default:
+  /api/images/{framework}/default:
     parameters:
-      - $ref: '#/components/parameters/Name'
+      - $ref: '#/components/parameters/Framework'
     put:
       tags: [images]
-      summary: 设默认版本（按 name；同一 name 有且只有一个默认版本）
+      summary: 设默认版本
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [version]
+              required: [framework_version]
               properties:
-                version: { type: string, example: v0.2.0 }
+                framework_version: { type: string, example: v0.2.0 }
       responses:
         '200':
           description: 已更新
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ImageOpResponse' }
-              example: { name: openclaw, default: v0.2.0, status: updated }
+              example: { framework: opencode, default: v0.2.0, status: updated }
         '404': { $ref: '#/components/responses/NotFound' }
 
-  /api/images/{name}/launch-spec:
+  /api/images/{framework}/launch-spec:
     parameters:
-      - $ref: '#/components/parameters/Name'
+      - $ref: '#/components/parameters/Framework'
     get:
       tags: [images]
-      summary: 取运行规格（按 name；gateway 拉起前查询 / Switch 用）
+      summary: 取框架运行规格（gateway 拉起前查询）
       description: >
-        gateway 拉起实例前查此拿元戎运行规格（name/version + Docker 沙箱字段 + access_mode）；
-        不带 version 取该 name 的默认版本。镜像管理据 name 默认版本组合返回。
+        gateway 拉起实例前查此拿元戎运行规格（framework/framework_version + Docker 沙箱字段）；
+        不带 version 取默认版本。镜像管理据框架默认版本组合返回。
       parameters:
         - name: version
           in: query
           required: false
-          description: 缺省取该 name 的默认版本
+          description: 缺省取默认版本
           schema: { type: string, example: v0.2.0 }
       responses:
         '200':
@@ -146,27 +139,27 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/LaunchSpec' }
-              example: { name: openclaw, framework: openclaw, version: v0.2.0, runtime_spec: { imageurl: harbor.local/adapted/openclaw:v0.2.0-mod1.3, cpu: 1000, memory: 2048 }, access_mode: [ { name: tui, port: "2222", cmd: openclaw }, { name: web, port: "18789", cmd: "openclaw gateway --port 18789" } ], env_vars: { A2X_LLM_KEY: "${A2X_LLM_KEY}" } }
+              example: { framework: opencode, framework_version: v0.2.0, runtime_spec: { imageurl: harbor.local/adapted/opencode:v0.2.0-mod1.3, cpu: 1000, memory: 2048, ports: [ { port: 8080, protocol: tcp } ] }, env_vars: { A2X_LLM_KEY: "${A2X_LLM_KEY}" } }
         '404': { $ref: '#/components/responses/NotFound' }
 
-  /api/images/{name}/{version}:
+  /api/images/{framework}/{version}:
     parameters:
-      - $ref: '#/components/parameters/Name'
+      - $ref: '#/components/parameters/Framework'
       - name: version
         in: path
         required: true
-        description: 镜像版本 version
+        description: framework_version
         schema: { type: string, example: v0.2.0 }
     delete:
       tags: [images]
-      summary: 注销镜像（按 name + version；校验无在用实例 → 删镜像仓文件 + 删条目）
+      summary: 注销镜像（校验无在用实例 → 删镜像仓文件 + 删条目）
       responses:
         '200':
           description: 已注销
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ImageOpResponse' }
-              example: { name: openclaw, version: v0.2.0, status: deregistered }
+              example: { framework: opencode, framework_version: v0.2.0, status: deregistered }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/ImageInUse' }
 
@@ -373,12 +366,11 @@ paths:
 
 components:
   parameters:
-    Name:
-      name: name
+    Framework:
+      name: framework
       in: path
       required: true
-      description: 镜像主键 name（取代原 framework 的定位作用；同一 name 一个默认版本）
-      schema: { type: string, example: openclaw }
+      schema: { type: string, example: opencode }
     # 分页参数 —— 与通用服务列表 GET /api/datasets/{dataset}/services 完全一致（见 https://github.com/Weizheng96/A2X-registry/blob/main/docs/backend_api.md）
     Size:
       name: size
@@ -470,23 +462,14 @@ components:
     # ── 镜像请求 / 条目 / 回执 ──
     RegisterImageRequest:
       type: object
-      required: [name, version, runtime_spec, uploaded_by]
+      required: [framework, framework_version, runtime_spec, uploaded_by]
       properties:
-        name: { type: string, description: 镜像主键（取代原 framework 定位）, example: openclaw }
-        framework: { type: string, description: 普通展示字段（非主键）, example: openclaw }
-        description: { type: string, description: 纯文本描述, example: "xxxxxxxx" }
-        package_path: { type: string, description: 包路径, example: /xxx/xxx/ }
-        image_archive_path: { type: string, description: 镜像归档路径, example: /xxx/xxx/ }
-        version: { type: string, description: 镜像版本（原 framework_version 更名）, example: v0.2.0 }
-        framework_version: { type: string, deprecated: true, description: "【待删除】由 version 取代，过渡期兼容", example: v0.2.0 }
+        framework: { type: string, example: opencode }
+        framework_version: { type: string, example: v0.2.0 }
         runtime_spec:
           type: object
           additionalProperties: true
           description: 运行规格（元戎 Docker 沙箱），作为不透明 JSON 对象透传，不关心具体字段
-        access_mode:
-          type: array
-          description: 接入方式数组（如 tui / web），拉起 / 接入时选用
-          items: { $ref: '#/components/schemas/AccessMode' }
         env_vars:
           type: object
           additionalProperties: { type: string }
@@ -499,25 +482,16 @@ components:
     ImageEntry:
       type: object
       description: >
-        一条目 = 一个 name 的一个 version，即镜像注册表的**一行**（§4.2）。扁平——不按 name 分组、无 versions 嵌套、
-        无 name 级 default 字段；name / framework / is_default 都是行上的普通字段。
+        一条目 = 一个框架版本，即镜像注册表的**一行**（§4.2）。扁平——不按框架分组、无 versions 嵌套、
+        无框架级 default 字段；framework 与 is_default 都是行上的普通字段。
       properties:
-        name: { type: string, description: 镜像主键, example: openclaw }
-        framework: { type: string, description: 普通展示字段（非主键）, example: openclaw }
-        description: { type: string, example: "xxxxxxxx" }
-        package_path: { type: string, example: /xxx/xxx/ }
-        image_archive_path: { type: string, example: /xxx/xxx/ }
-        version: { type: string, description: 镜像版本（原 framework_version 更名）, example: v0.2.0 }
-        framework_version: { type: string, deprecated: true, description: "【待删除】由 version 取代", example: v0.2.0 }
-        is_default: { type: boolean, description: 该行是否为其 name 的默认版本；不参与排序, example: true }
+        framework: { type: string, example: opencode }
+        framework_version: { type: string, example: v0.2.0 }
+        is_default: { type: boolean, description: 该行是否为其框架的默认版本；不参与排序, example: true }
         runtime_spec:
           type: object
           additionalProperties: true
           description: 运行规格（元戎 Docker 沙箱），作为不透明 JSON 对象透传，不关心具体字段
-        access_mode:
-          type: array
-          description: 接入方式数组（如 tui / web）
-          items: { $ref: '#/components/schemas/AccessMode' }
         env_vars:
           type: object
           additionalProperties: { type: string }
@@ -528,40 +502,26 @@ components:
         mounts: { type: array, items: { $ref: '#/components/schemas/Mount' } }
         uploaded_by: { type: string, example: user-01 }
         created_at: { type: string, format: date-time, example: "2026-07-06T10:00:00Z" }
-    AccessMode:
-      type: object
-      description: 一种接入方式（如 tui / web）
-      required: [name, port]
-      properties:
-        name: { type: string, description: 接入方式名, example: web }
-        port: { type: string, description: 端口, example: "18789" }
-        cmd: { type: string, description: 启动命令, example: "openclaw gateway --port 18789" }
     ImageOpResponse:
       type: object
       description: 镜像操作回执（RegisterResponse 风格）
       properties:
-        name: { type: string }
         framework: { type: string }
-        version: { type: string }
+        framework_version: { type: string }
         default: { type: string }
         status: { type: string, enum: [registered, updated, deregistered] }
 
     # ── 镜像运行规格（GET …/launch-spec 响应）──
     LaunchSpec:
       type: object
-      description: 元戎运行规格（name/version + runtime_spec + access_mode + env_vars），供 gateway 拉起
+      description: 元戎运行规格（framework/framework_version + runtime_spec + env_vars），供 gateway 拉起
       properties:
-        name: { type: string, example: openclaw }
-        framework: { type: string, description: 普通展示字段（非主键）, example: openclaw }
-        version: { type: string, description: 镜像版本（原 framework_version 更名）, example: v0.2.0 }
+        framework: { type: string, example: opencode }
+        framework_version: { type: string, example: v0.2.0 }
         runtime_spec:
           type: object
           additionalProperties: true
           description: 运行规格（元戎 Docker 沙箱），作为不透明 JSON 对象透传，不关心具体字段
-        access_mode:
-          type: array
-          description: 接入方式数组（如 tui / web），供 gateway 选端口 / 命令拉起
-          items: { $ref: '#/components/schemas/AccessMode' }
         env_vars:
           type: object
           additionalProperties: { type: string }
