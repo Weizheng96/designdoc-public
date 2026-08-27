@@ -96,7 +96,7 @@ flowchart TB
 |----|------|
 | `Backend` | 存储后端抽象；`connect(cfg)` → `Backend(kind="sqlite"/"rqlite", conn=…)`。屏蔽单机 / 多机差异 |
 | `now_iso()` | 服务端时间戳（ISO8601）|
-| `image_sid(framework, framework_version)` | 镜像 service_id 派生：`f"image_{sha256(framework+'|'+framework_version)[:16]}"`（每框架每版本一行）|
+| `image_sid(name, version)` | 镜像 service_id 派生：`f"image_{sha256(name+'|'+version)[:16]}"`（每 name 每 version 一行）|
 | `instance_sid(user, framework)` | 实例 service_id 派生：`f"generic_{sha256(user+'|'+framework)[:8]}"`（**确定性**：每用户每框架唯一 → 一个实例）|
 | `paths.config_path()` | 解析 `A2X_REGISTRY_HOME`/`registry.env` 等配置路径 |
 | 错误类型 | `NotFoundError` / `ValidationError` / `NotOwnedError` / `ImageInUseError` / `ExternalDependencyError`（映射 404/400/403/409/502）|
@@ -144,41 +144,42 @@ flowchart TB
 
 | 函数 | 功能 |
 |------|------|
-| `register_image(fw, ver, spec, by) -> dict` | 登记**一行**（该框架该版本，幂等 upsert）；写 `uploaded_by=by`、`version_key=version_key(ver)`（§3.2）；该框架无默认版本时置 `is_default=1` |
-| `query(filters, size, page) -> (list[dict], int)` | 读版本行、**扁平返回**（一条目 = 一行，`framework` / `is_default` 为行上普通字段，不分组）；**分页单位 = 行**，返回 `(条目, 过滤后行数)` 供路由写 `X-Total-Count` |
-| `deregister(fw, ver) -> dict` | **先校验无在用实例**（查 `实例注册表` framework+version），无则删镜像仓文件 + **删该版本行**；删的是默认版本则把最新版补为默认 |
-| `set_default(fw, ver)` / `get_default_version(fw) -> str` | 设默认：清该框架旧 `is_default`、置新版为 1；取默认：`WHERE framework=? AND is_default=1`（未设取框架版本最新）|
-| `resolve_launch_spec(fw, ver) -> dict` | 组合元戎运行规格（**扁平**）`{framework, framework_version, imageurl, workdir, mounts, cpu, memory, ports, env}`；经注册管理**按 framework+version 精确查一行**、抽取字段 |
+| `register_image(name, version, spec, by, **fields) -> dict` | 登记**一行**（该 name 该 version，幂等 upsert）；写 `uploaded_by=by`、`version_key=version_key(version)`（§3.2）、`framework`/`description`/`package_path`/`image_archive_path`/`access_mode` 等；该 name 无默认版本时置 `is_default=1` |
+| `query(filters, size, page) -> (list[dict], int)` | 读版本行、**扁平返回**（一条目 = 一行，`name` / `framework` / `is_default` 为行上普通字段，不分组）；**分页单位 = 行**，返回 `(条目, 过滤后行数)` 供路由写 `X-Total-Count` |
+| `deregister(name, version) -> dict` | **先校验无在用实例**（按该行 `framework`+`version` 查 `实例注册表`），无则删镜像仓文件 + **删该版本行**；删的是默认版本则把最新版补为默认 |
+| `set_default(name, version)` / `get_default_version(name) -> str` | 设默认：清该 name 旧 `is_default`、置新版为 1；取默认：`WHERE name=? AND is_default=1`（未设取最新版本）|
+| `resolve_launch_spec(name, version) -> dict` | 组合元戎运行规格（**扁平**）`{name, framework, version, imageurl, access_mode, workdir, mounts, cpu, memory, env}`；经注册管理**按 name+version 精确查一行**、抽取字段 |
 
 **REST**（`image/router.py`）：
 
 | 端点 | 映射 |
 |------|------|
 | `POST /api/images` | `register_image`（发起方：镜像处理模块）|
-| `GET /api/images` | `query`（用户，`?framework` / `?uploaded_by` / `?size` / `?page`；分页元数据走响应头）|
-| `GET /api/images/{fw}/launch-spec` | `resolve_launch_spec(fw, version or get_default_version(fw))`（gateway 拉起前查）|
-| `PUT /api/images/{fw}/default` | `set_default`（用户）|
-| `DELETE /api/images/{fw}/{version}` | `deregister`（用户；在用则 `409`）|
+| `GET /api/images` | `query`（用户，`?name` / `?framework` / `?uploaded_by` / `?size` / `?page`；分页元数据走响应头）|
+| `GET /api/images/{name}/launch-spec` | `resolve_launch_spec(name, version or get_default_version(name))`（gateway 拉起前查）|
+| `PUT /api/images/{name}/default` | `set_default`（用户）|
+| `DELETE /api/images/{name}/{version}` | `deregister`（用户；在用则 `409`）|
 
 ```python
-def resolve_launch_spec(self, framework, fw_version) -> dict:
+def resolve_launch_spec(self, name, version) -> dict:
     v = self.register.query("镜像注册表",                        # 精确一行（列合并 data）
-                            {"framework": framework, "framework_version": fw_version})[0]
-    return {"framework": framework, "framework_version": fw_version,   # 供 gateway 记录
-            "imageurl": v["imageurl"], "workdir": v.get("workdir"),    # 扁平：一行一版本，无 rootfs 层
+                            {"name": name, "version": version})[0]
+    return {"name": name, "framework": v.get("framework"), "version": version,  # 供 gateway 记录
+            "imageurl": v["imageurl"], "access_mode": v.get("access_mode"),
+            "workdir": v.get("workdir"),                                # 扁平：一行一版本，无 rootfs 层
             "mounts": v.get("mounts"), "cpu": v.get("cpu"), "memory": v.get("memory"),
             "ports": v.get("ports"), "env": v.get("env")}
 ```
 
-**`query` 的分页**：分页单位与存储单位同级（都是**行** = 一个框架版本），故是直白的 `LIMIT/OFFSET`——不分组、不需子查询，`framework` / `is_default` 作为普通列随行返回。
+**`query` 的分页**：分页单位与存储单位同级（都是**行** = 一个 name 的一个 version），故是直白的 `LIMIT/OFFSET`——不分组、不需子查询，`name` / `framework` / `is_default` 作为普通列随行返回。
 
 ```python
 def query(self, filters=None, size=-1, page=1) -> tuple[list[dict], int]:
-    where, args = self._build_filter(filters)          # framework / uploaded_by → SQL 片段
+    where, args = self._build_filter(filters)          # name / framework / uploaded_by → SQL 片段
     total = self.db.scalar(                            # X-Total-Count = 过滤后的行数
         f"SELECT COUNT(*) FROM image WHERE registry=? {where}", [self.reg, *args])
     sql = (f"SELECT * FROM image WHERE registry=? {where} "
-           "ORDER BY framework ASC, version_key DESC, "
+           "ORDER BY name ASC, version_key DESC, "
            "         json_extract(data,'$.created_at') DESC")
     if size > 0:
         sql += " LIMIT ? OFFSET ?"; args = [*args, size, (page - 1) * size]
@@ -193,8 +194,8 @@ def query(self, filters=None, size=-1, page=1) -> tuple[list[dict], int]:
 
 | 函数 | 功能 |
 |------|------|
-| `register_instance(entry) -> dict` | 幂等 upsert：写 `service_id`/`kind`/`framework`/`framework_version`/`node`/`address`/`user`（均 gateway 提供；`service_id` 由 (user, framework) 派生）|
-| `update_instance(sid, fields) -> dict` | **变更**：部分更新 `node`/`address`（经 `register.patch`）；不存在则 `404` |
+| `register_instance(entry) -> dict` | 幂等 upsert：写 `service_id`/`kind`/`framework`/`framework_version`/`node`/`address`/`user`，及可选 `instance_id`（元戎实例 ID）（均 gateway 提供；`service_id` 由 (user, framework) 派生）|
+| `update_instance(sid, fields) -> dict` | **变更**：部分更新 `node`/`address`/`instance_id`（经 `register.patch`）；不存在则 `404` |
 | `deregister_instance(sid) -> None` | 删条目（幂等；元戎停止由 gateway 完成）|
 | `list_instances(filter, include_unhealthy, size, page) -> (list[dict], int)` | 查询 + 据 node 心跳派生 `status`；`include_unhealthy=false` 只回 `运行`。排序 `framework, "user", service_id`；**先过滤后分页**，返回 `(条目, 过滤后总数)` 供路由写 `X-Total-Count` |
 | `expire_node(node) -> None` | 心跳注入：删该 node 全部实例（过宽限）|
@@ -215,12 +216,13 @@ def register_instance(self, entry) -> dict:
     row = {"service_id": entry["service_id"], "kind": entry["kind"],
            "framework": entry["framework"], "framework_version": entry["framework_version"],
            "node": entry["node"], "address": entry["address"], "user": entry["user"],
+           "instance_id": entry.get("instance_id"),       # 元戎实例 ID（可空）
            "created_at": now, "last_active_at": now}
     return self.register.register("实例注册表", row)        # 幂等 upsert
 
-def update_instance(self, service_id, fields) -> dict:     # 变更：node/address
+def update_instance(self, service_id, fields) -> dict:     # 变更：node/address/instance_id
     return self.register.patch("实例注册表", service_id,
-                               {k: fields[k] for k in ("node", "address") if k in fields})
+                               {k: fields[k] for k in ("node", "address", "instance_id") if k in fields})
 ```
 
 **`status` 与分页的相互作用**（易错点）：`status` 不落库、由 node 心跳在**内存**派生，所以 `include_unhealthy=false` 的过滤**不能**「先全量捞出 → 逐行派生 status → 内存过滤 → 再切片」——那样 `LIMIT/OFFSET` 就形同虚设，`X-Total-Count` 也得靠内存数。
@@ -281,9 +283,9 @@ def main():
 
 | 方法 | 映射 |
 |------|------|
-| `get_launch_spec(ds, framework, version=None) -> dict` | `GET …/images/{fw}/launch-spec`（拉起前拿规格）|
-| `register_instance(ds, kind, framework, framework_version, node, address, user) -> dict` | 内部 `service_id = instance_sid(user, framework)` → `POST …/instances` |
-| `update_instance(ds, service_id, node=None, address=None) -> dict` | `PATCH …/instances/{sid}`（变更）|
+| `get_launch_spec(ds, name, version=None) -> dict` | `GET …/images/{name}/launch-spec`（拉起前拿规格）|
+| `register_instance(ds, kind, framework, framework_version, node, address, user, instance_id=None) -> dict` | 内部 `service_id = instance_sid(user, framework)` → `POST …/instances` |
+| `update_instance(ds, service_id, node=None, address=None, instance_id=None) -> dict` | `PATCH …/instances/{sid}`（变更）|
 | `deregister_instance(ds, service_id) -> dict` | `DELETE …/instances/{sid}` |
 | `node_heartbeat(node) -> dict` | `POST /api/nodes/{node}/heartbeat` |
 | `list_instances(ds, **filters) -> list` | `GET …/instances`（前端 / 运维用）|
@@ -344,20 +346,22 @@ CREATE INDEX idx_service_type ON service(registry, type);
 -- 镜像（一行一版本）
 CREATE TABLE image (
   registry          TEXT NOT NULL,
-  service_id        TEXT NOT NULL,               -- image_sid(framework, framework_version)
-  framework         TEXT NOT NULL,               -- 热：按框架查
-  framework_version TEXT NOT NULL,               -- 热：按版本查
-  version_key       TEXT NOT NULL,               -- 排序：framework_version 的规范化键，注册时算好（见下）
-  is_default        INTEGER NOT NULL DEFAULT 0,  -- 该框架默认版本标记（每框架恰一行=1）；不参与排序
+  service_id        TEXT NOT NULL,               -- image_sid(name, version)
+  name              TEXT NOT NULL,               -- 热：主键定位字段（取代 framework）；按 name 查 / 分组 / 定默认
+  framework         TEXT,                        -- 展示字段（普通，可筛选、非主键）
+  version           TEXT NOT NULL,               -- 热：按版本查（原 framework_version 更名）
+  version_key       TEXT NOT NULL,               -- 排序：version 的规范化键，注册时算好（见下）
+  is_default        INTEGER NOT NULL DEFAULT 0,  -- 该 name 默认版本标记（每 name 恰一行=1）；不参与排序
   uploaded_by       TEXT,                        -- 热：按上传者筛选；九问预置条目为 'system'
-  data              TEXT NOT NULL,               -- JSON 扁平（无 rootfs 层）：{imageurl, workdir, mounts,
+  data              TEXT NOT NULL,               -- JSON 扁平（无 rootfs 层）：{description, package_path,
+                                                 --   image_archive_path, imageurl, access_mode, workdir, mounts,
                                                  --   cpu, memory, ports, env, image_module_version, created_at}
   PRIMARY KEY (registry, service_id)
 );
-CREATE INDEX idx_image_fw     ON image(registry, framework);
-CREATE INDEX idx_image_fw_ver ON image(registry, framework, framework_version);
-CREATE INDEX idx_image_by     ON image(registry, uploaded_by);
-CREATE INDEX idx_image_order  ON image(registry, framework, version_key DESC);  -- 覆盖列表排序
+CREATE INDEX idx_image_name    ON image(registry, name);
+CREATE INDEX idx_image_name_ver ON image(registry, name, version);
+CREATE INDEX idx_image_by      ON image(registry, uploaded_by);
+CREATE INDEX idx_image_order   ON image(registry, name, version_key DESC);  -- 覆盖列表排序
 
 -- 实例（status 落库，由 gateway 据元戎 List 写入；注册中心不派生、不自动剔除）
 CREATE TABLE instance (
@@ -369,7 +373,7 @@ CREATE TABLE instance (
   framework_version TEXT,
   node              TEXT,                -- 热：按节点查
   "user"            TEXT,                -- 热：按用户 ID 查该用户实例
-  data              TEXT NOT NULL,       -- JSON {address, created_at, last_active_at}
+  data              TEXT NOT NULL,       -- JSON {address, instance_id, created_at, last_active_at}（instance_id=元戎实例 ID，可空）
   PRIMARY KEY (registry, service_id)
 );
 CREATE INDEX idx_instance_node ON instance(registry, node);
@@ -385,11 +389,11 @@ CREATE INDEX idx_instance_order ON instance(registry, framework, "user", service
 import re
 _SEMVER = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:-(.+))?$")
 
-def version_key(framework_version: str) -> str:
+def version_key(version: str) -> str:
     """v0.2.0 → '00000.00002.00000~'；v0.10.0 → '00000.00010.00000~'（补零后正确大于 v0.2.0）
     v0.2.0-beta → '00000.00002.00000-beta'（'~'=0x7E 大于任何字母与 '-'，
-    故降序时正式版排在同号预发布版之前）；不合规 → 全零，排在该框架合规版本之后。"""
-    m = _SEMVER.match(framework_version.strip())
+    故降序时正式版排在同号预发布版之前）；不合规 → 全零，排在该 name 合规版本之后。"""
+    m = _SEMVER.match(version.strip())
     if not m:
         return "00000.00000.00000"                       # 兜底：组内再按 created_at 降序
     major, minor, patch, pre = m.groups()

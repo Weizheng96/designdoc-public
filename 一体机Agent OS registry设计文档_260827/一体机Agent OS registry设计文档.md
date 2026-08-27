@@ -27,9 +27,9 @@
 | 域 | 功能 | 发起方 | 说明 |
 |----|------|--------|------|
 | **镜像** | 镜像注册 | 镜像处理模块 | 适配镜像引用 + 元戎运行规格（`runtime_spec` 透传）登记进镜像注册表 |
-| | 镜像查询 | 用户 | 列框架版本（一条目 = 一行，扁平；支持分页，一页 N 个框架版本）|
-| | **取运行规格** | gateway | 拉起前查框架默认版本的元戎运行规格（`launch-spec`）|
-| | 设默认版本 | 用户 | 指定某版本为默认；未设取框架版本最新 |
+| | 镜像查询 | 用户 | 列版本行（一条目 = 一行，扁平；支持分页，一页 N 个版本）|
+| | **取运行规格** | gateway | 拉起前按 `name` 查默认版本的元戎运行规格（`launch-spec`）|
+| | 设默认版本 | 用户 | 按 `name` 指定某版本为默认；未设取最新版本 |
 | | 镜像注销 | 用户 | 校验无在用实例 → 删镜像仓文件 + 删条目 |
 | **实例** | **实例注册** | gateway | 自行拉起后带落点（node / address）写入注册表，`status` 初始 `运行` |
 | | **实例变更** | gateway | 落点变化（元戎迁移）或**状态变化**（置 `停止` / `异常`）时更新条目 |
@@ -136,31 +136,31 @@ flowchart TB
 | 接口 | 一页 = | `X-Total-Count` | 一元素 = |
 |------|--------|-----------------|----------|
 | `GET /api/instances` | N **个实例** | 过滤后的实例数 | 一个实例（实例注册表一行）|
-| `GET /api/images` | N **个框架版本** | 过滤后的**版本行数** | 一个框架版本（镜像注册表一行）|
+| `GET /api/images` | N **个版本行** | 过滤后的**版本行数** | 一个版本行（镜像注册表一行）|
 
-镜像**不做按框架分组的层次化返回**：镜像注册表一行 = 一个框架版本（[§4.2](#42-镜像注册表)），条目就按行扁平返回，`framework` 与 `is_default` 是行上的普通字段。这样存储、接口、分页三者同一个单位，分页是直白的 `LIMIT/OFFSET`：
+镜像**不做按 name 分组的层次化返回**：镜像注册表一行 = 一个 name 的一个 version（[§4.2](#42-镜像注册表)），条目就按行扁平返回，`name` / `framework` / `is_default` 是行上的普通字段。这样存储、接口、分页三者同一个单位，分页是直白的 `LIMIT/OFFSET`：
 
 ```sql
 -- X-Total-Count
 SELECT COUNT(*) FROM image WHERE registry='images';
 -- 一页
 SELECT * FROM image WHERE registry='images'
-ORDER BY framework ASC, version_key DESC, json_extract(data, '$.created_at') DESC
+ORDER BY name ASC, version_key DESC, json_extract(data, '$.created_at') DESC
 LIMIT :size OFFSET :offset;
 ```
 
-> 排序把同一框架的各版本排在**相邻位置**，前端要「框架 → 版本」的树，按 `framework` 就地 group 一次即可，信息没丢。框架的版本集**可以跨页**（第 N 页页尾是 `langgraph v0.2.0`、第 N+1 页页首是 `langgraph v0.1.0`）——这是扁平分页的正常行为，不是缺陷。
+> 排序把同一 name 的各版本排在**相邻位置**，前端要「name → 版本」的树，按 `name` 就地 group 一次即可，信息没丢。一个 name 的版本集**可以跨页**——这是扁平分页的正常行为，不是缺陷。
 >
-> `created_at` 存在 `data` JSON 里（[§4.2](#42-镜像注册表)）而非独立列，故末位比较走 `json_extract`。它只在 `version_key` 相同时才起作用——即同框架下多个**版本号不合规**的条目（`version_key` 均为兜底值），量级极小，不必为它单开列或建索引。rqlite 底层即 SQLite，`json_extract` 可直接下推。
+> `created_at` 存在 `data` JSON 里（[§4.2](#42-镜像注册表)）而非独立列，故末位比较走 `json_extract`。它只在 `version_key` 相同时才起作用——即同 name 下多个**版本号不合规**的条目（`version_key` 均为兜底值），量级极小。rqlite 底层即 SQLite，`json_extract` 可直接下推。
 
 **确定序**（分页的前提，非优化项）：无全序时 `LIMIT/OFFSET` 跨页不稳定，翻页会重复或漏行，故两张表各定一个**全序**：
 
 | 注册表 | 排序 | 说明 |
 |--------|------|------|
-| 镜像注册表 | `framework ASC, version_key DESC, json_extract(data,'$.created_at') DESC` | 框架名升序；框架内**新版本在前**。`is_default` **不参与排序**，只作标记 |
+| 镜像注册表 | `name ASC, version_key DESC, json_extract(data,'$.created_at') DESC` | name 升序；name 内**新版本在前**。`is_default` **不参与排序**，只作标记 |
 | 实例注册表 | `framework ASC, "user" ASC, service_id ASC` | `service_id` 是主键，兜底保证全序 |
 
-> `version_key` 是**注册时算好并落库的规范化排序键**（[§4.2](#42-镜像注册表)），不是 `framework_version` 本身——直接按字符串排会把 `v0.10.0` 排在 `v0.2.0` 之前。之所以落库而非查询时算，是因为排序必须在 SQL 内完成才谈得上下推，而 SQL 里无法解析语义化版本号。
+> `version_key` 是**注册时算好并落库的规范化排序键**（[§4.2](#42-镜像注册表)），不是 `version` 本身——直接按字符串排会把 `v0.10.0` 排在 `v0.2.0` 之前。之所以落库而非查询时算，是因为排序必须在 SQL 内完成才谈得上下推，而 SQL 里无法解析语义化版本号。
 
 ### 3.1 镜像管理
 
@@ -191,32 +191,34 @@ flowchart LR
 ```
 
 - **接口**：`POST /api/images`（发起方：镜像处理模块）
-- **请求字段**：`framework` · `framework_version` · **`runtime_spec`（不透明 JSON，原样透传）** · `env_vars` · `workspace` · `mounts` · `image_module_version` · `uploaded_by`
+- **请求字段**：`name`（主键）· `framework`（展示）· `version` · `description` · `package_path` · `image_archive_path` · **`runtime_spec`（不透明 JSON，原样透传）** · `access_mode`（`{name,port,cmd}` 数组）· `env_vars` · `workspace` · `mounts` · `image_module_version` · `uploaded_by`
 - **输入示例**：
   ```json
-  { "framework": "opencode", "framework_version": "v0.2.0",
-    "runtime_spec": { "imageurl": "harbor.local/adapted/opencode:v0.2.0-mod1.3",
-      "cpu": 1000, "memory": 2048, "ports": [ { "port": 8080, "protocol": "tcp" } ] },
+  { "name": "openclaw", "framework": "openclaw", "version": "v0.2.0",
+    "description": "xxxxxxxx", "package_path": "/xxx/xxx/", "image_archive_path": "/xxx/xxx/",
+    "runtime_spec": { "imageurl": "harbor.local/adapted/openclaw:v0.2.0-mod1.3", "cpu": 1000, "memory": 2048 },
+    "access_mode": [ { "name": "tui", "port": "2222", "cmd": "openclaw" },
+                     { "name": "web", "port": "18789", "cmd": "openclaw gateway --port 18789" } ],
     "env_vars": { "A2X_LLM_KEY": "${A2X_LLM_KEY}" },
     "workspace": "/app",
     "mounts": [ { "source": "/data/agent", "target": "/data", "readonly": false } ],
     "image_module_version": "v1.3", "uploaded_by": "user-01" }
   ```
-- **输出示例**：`{ "framework": "opencode", "framework_version": "v0.2.0", "status": "registered" }`
+- **输出示例**：`{ "name": "openclaw", "framework": "openclaw", "version": "v0.2.0", "status": "registered" }`
 
-> **`runtime_spec` 为什么是不透明对象**：其字段由元戎的沙箱 API 定义（见 [openyuanrong 官方文档](https://docs.openyuanrong.org/)），元戎接口一变字段就跟着变。注册中心只负责存取，不解析、不校验结构——这样元戎侧演进不会牵动注册中心的 schema 与代码。与之相对，`env_vars` / `workspace` / `mounts` / `image_module_version` 是**注册中心自己要用或要展示**的字段，故提到顶层。同框架多次注册按 `framework_version` 合并（同版本重发即幂等覆盖）；该框架尚无默认版本时，首次注册的版本自动成为默认。
+> **`runtime_spec` 为什么是不透明对象**：其字段由元戎的沙箱 API 定义（见 [openyuanrong 官方文档](https://docs.openyuanrong.org/)），元戎接口一变字段就跟着变，注册中心只存取、不解析。同一 `name` 多次注册按 `version` 合并（同版本重发即幂等覆盖）；该 `name` 尚无默认版本时，首次注册的版本自动成为默认。`framework` 降为普通展示字段（原定位作用由 `name` 取代）；`framework_version` 更名为 `version`（旧名过渡期兼容）。
 
 #### 3.1.2 镜像查询
 
-用户经网页查询镜像（经注册管理读镜像注册表）。**一条目 = 一个框架版本**（即注册表一行），返回**扁平数组**、不按框架分组。支持**分页**（`size` / `page`，同 [§3](#3-场景逻辑视图) 分页约定；**一页 = N 个框架版本**）。
+用户经网页查询镜像（经注册管理读镜像注册表）。**一条目 = 一个 `name` 的一个 `version`**（即注册表一行），返回**扁平数组**、不按 name 分组。支持**分页**（`size` / `page`，同 [§3](#3-场景逻辑视图) 分页约定；**一页 = N 个版本行**）。
 
 - **接口**：`GET /api/images`（发起方：用户）
-- **筛选参数**：`framework`（按框架）· `uploaded_by`（按上传者）；保留参数 `size` / `page` 不参与筛选
-- **顺序**：`framework` 升序 → `version_key` 降序（**新版本在前**，见 [§4.2](#42-镜像注册表)）。同框架各版本因此**相邻**，前端要「框架 → 版本」的树按 `framework` 就地 group 即可。不分页（`size=-1`）时同样成立
+- **筛选参数**：`name`（按主键）· `framework`（按展示字段）· `uploaded_by`（按上传者）；保留参数 `size` / `page` 不参与筛选。`description` / `package_path` / `image_archive_path` / `access_mode` 只返回、不作筛选
+- **顺序**：`name` 升序 → `version_key` 降序（**新版本在前**，见 [§4.2](#42-镜像注册表)）。同 name 各版本因此**相邻**，前端要「name → 版本」的树按 `name` 就地 group 即可。不分页（`size=-1`）时同样成立
 
-**筛选语义**：筛选直接作用在**行**上，命中即返回该行——无分组，故不存在「框架命中但某些版本被筛掉」这类歧义。`is_default` 是行上的普通字段，跟着行走。
+**筛选语义**：筛选直接作用在**行**上，命中即返回该行——无分组，故不存在「name 命中但某些版本被筛掉」这类歧义。`is_default` 是行上的普通字段，跟着行走。
 
-> 以下三例共用同一份镜像注册表快照：**12 个框架版本行**、分属 7 个框架。其中 `user-01` 上传了 4 行（`crewai` v0.4.0、`langgraph` v0.3.1、`opencode` v0.2.0 / v0.1.0）。全序为：`aider` v0.8.0 · `autogen` v0.4.0 · `claude-code` v1.0.0 / v0.9.0 · `crewai` v0.5.0 / v0.4.0 · `jiuwen-report` v1.0.0 · `langgraph` v0.3.1 / v0.2.0 / v0.1.0 · `opencode` v0.2.0 / v0.1.0。为示例简洁，各行的 `runtime_spec` 只展开 `imageurl`，`env_vars` / `workspace` / `mounts` 省略（完整字段见 [`registry_openapi.yaml`](./registry_openapi.yaml) 的 `ImageEntry`）。
+> 以下三例共用同一份镜像注册表快照：**12 个版本行**、分属 7 个 name。为示例简洁，各行 `name` = `framework`（单镜像），省略 `name` / `description` / `package_path` / `image_archive_path` / `access_mode`，`runtime_spec` 只展开 `imageurl`（完整字段见 [`registry_openapi.yaml`](./registry_openapi.yaml) 的 `ImageEntry` 与 [§4.2](#42-镜像注册表)）。全序：`aider` v0.8.0 · `autogen` v0.4.0 · `claude-code` v1.0.0 / v0.9.0 · `crewai` v0.5.0 / v0.4.0 · `jiuwen-report` v1.0.0 · `langgraph` v0.3.1 / v0.2.0 / v0.1.0 · `opencode` v0.2.0 / v0.1.0。
 
 **例 1 · 全列表查询**（不带 `size` → 不分页、返回全部 12 行）
 
@@ -231,51 +233,51 @@ GET /api/images
 
 ```json
 [
-  { "framework": "aider", "framework_version": "v0.8.0", "is_default": true,
+  { "framework": "aider", "version": "v0.8.0", "is_default": true,
     "runtime_spec": { "imageurl": "harbor.local/adapted/aider:v0.8.0-mod1.3" },
     "image_module_version": "v1.3", "uploaded_by": "user-02",
     "created_at": "2026-07-02T09:10:00Z" },
-  { "framework": "autogen", "framework_version": "v0.4.0", "is_default": true,
+  { "framework": "autogen", "version": "v0.4.0", "is_default": true,
     "runtime_spec": { "imageurl": "harbor.local/adapted/autogen:v0.4.0-mod1.3" },
     "image_module_version": "v1.3", "uploaded_by": "user-02",
     "created_at": "2026-07-01T10:00:00Z" },
-  { "framework": "claude-code", "framework_version": "v1.0.0", "is_default": true,
+  { "framework": "claude-code", "version": "v1.0.0", "is_default": true,
     "runtime_spec": { "imageurl": "harbor.local/adapted/claude-code:v1.0.0-mod1.3" },
     "image_module_version": "v1.3", "uploaded_by": "user-02",
     "created_at": "2026-07-05T11:00:00Z" },
-  { "framework": "claude-code", "framework_version": "v0.9.0", "is_default": false,
+  { "framework": "claude-code", "version": "v0.9.0", "is_default": false,
     "runtime_spec": { "imageurl": "harbor.local/adapted/claude-code:v0.9.0-mod1.2" },
     "image_module_version": "v1.2", "uploaded_by": "user-02",
     "created_at": "2026-06-30T16:40:00Z" },
-  { "framework": "crewai", "framework_version": "v0.5.0", "is_default": true,
+  { "framework": "crewai", "version": "v0.5.0", "is_default": true,
     "runtime_spec": { "imageurl": "harbor.local/adapted/crewai:v0.5.0-mod1.3" },
     "image_module_version": "v1.3", "uploaded_by": "user-02",
     "created_at": "2026-07-04T08:00:00Z" },
-  { "framework": "crewai", "framework_version": "v0.4.0", "is_default": false,
+  { "framework": "crewai", "version": "v0.4.0", "is_default": false,
     "runtime_spec": { "imageurl": "harbor.local/adapted/crewai:v0.4.0-mod1.2" },
     "image_module_version": "v1.2", "uploaded_by": "user-01",
     "created_at": "2026-06-25T13:30:00Z" },
-  { "framework": "jiuwen-report", "framework_version": "v1.0.0", "is_default": true,
+  { "framework": "jiuwen-report", "version": "v1.0.0", "is_default": true,
     "runtime_spec": { "imageurl": "harbor.local/adapted/jiuwen-report:v1.0.0-mod1.3" },
     "image_module_version": "v1.3", "uploaded_by": "system",
     "created_at": "2026-06-20T00:00:00Z" },
-  { "framework": "langgraph", "framework_version": "v0.3.1", "is_default": true,
+  { "framework": "langgraph", "version": "v0.3.1", "is_default": true,
     "runtime_spec": { "imageurl": "harbor.local/adapted/langgraph:v0.3.1-mod1.3" },
     "image_module_version": "v1.3", "uploaded_by": "user-01",
     "created_at": "2026-07-07T15:05:00Z" },
-  { "framework": "langgraph", "framework_version": "v0.2.0", "is_default": false,
+  { "framework": "langgraph", "version": "v0.2.0", "is_default": false,
     "runtime_spec": { "imageurl": "harbor.local/adapted/langgraph:v0.2.0-mod1.2" },
     "image_module_version": "v1.2", "uploaded_by": "user-03",
     "created_at": "2026-06-26T09:00:00Z" },
-  { "framework": "langgraph", "framework_version": "v0.1.0", "is_default": false,
+  { "framework": "langgraph", "version": "v0.1.0", "is_default": false,
     "runtime_spec": { "imageurl": "harbor.local/adapted/langgraph:v0.1.0-mod1.1" },
     "image_module_version": "v1.1", "uploaded_by": "user-03",
     "created_at": "2026-06-18T09:00:00Z" },
-  { "framework": "opencode", "framework_version": "v0.2.0", "is_default": true,
+  { "framework": "opencode", "version": "v0.2.0", "is_default": true,
     "runtime_spec": { "imageurl": "harbor.local/adapted/opencode:v0.2.0-mod1.3" },
     "image_module_version": "v1.3", "uploaded_by": "user-01",
     "created_at": "2026-07-06T10:00:00Z" },
-  { "framework": "opencode", "framework_version": "v0.1.0", "is_default": false,
+  { "framework": "opencode", "version": "v0.1.0", "is_default": false,
     "runtime_spec": { "imageurl": "harbor.local/adapted/opencode:v0.1.0-mod1.1" },
     "image_module_version": "v1.1", "uploaded_by": "user-01",
     "created_at": "2026-06-28T14:20:00Z" }
@@ -300,19 +302,19 @@ X-Page-Size: 4
 
 ```json
 [
-  { "framework": "crewai", "framework_version": "v0.5.0", "is_default": true,
+  { "framework": "crewai", "version": "v0.5.0", "is_default": true,
     "runtime_spec": { "imageurl": "harbor.local/adapted/crewai:v0.5.0-mod1.3" },
     "image_module_version": "v1.3", "uploaded_by": "user-02",
     "created_at": "2026-07-04T08:00:00Z" },
-  { "framework": "crewai", "framework_version": "v0.4.0", "is_default": false,
+  { "framework": "crewai", "version": "v0.4.0", "is_default": false,
     "runtime_spec": { "imageurl": "harbor.local/adapted/crewai:v0.4.0-mod1.2" },
     "image_module_version": "v1.2", "uploaded_by": "user-01",
     "created_at": "2026-06-25T13:30:00Z" },
-  { "framework": "jiuwen-report", "framework_version": "v1.0.0", "is_default": true,
+  { "framework": "jiuwen-report", "version": "v1.0.0", "is_default": true,
     "runtime_spec": { "imageurl": "harbor.local/adapted/jiuwen-report:v1.0.0-mod1.3" },
     "image_module_version": "v1.3", "uploaded_by": "system",
     "created_at": "2026-06-20T00:00:00Z" },
-  { "framework": "langgraph", "framework_version": "v0.3.1", "is_default": true,
+  { "framework": "langgraph", "version": "v0.3.1", "is_default": true,
     "runtime_spec": { "imageurl": "harbor.local/adapted/langgraph:v0.3.1-mod1.3" },
     "image_module_version": "v1.3", "uploaded_by": "user-01",
     "created_at": "2026-07-07T15:05:00Z" }
@@ -337,11 +339,11 @@ X-Page-Size: 2
 
 ```json
 [
-  { "framework": "crewai", "framework_version": "v0.4.0", "is_default": false,
+  { "framework": "crewai", "version": "v0.4.0", "is_default": false,
     "runtime_spec": { "imageurl": "harbor.local/adapted/crewai:v0.4.0-mod1.2" },
     "image_module_version": "v1.2", "uploaded_by": "user-01",
     "created_at": "2026-06-25T13:30:00Z" },
-  { "framework": "langgraph", "framework_version": "v0.3.1", "is_default": true,
+  { "framework": "langgraph", "version": "v0.3.1", "is_default": true,
     "runtime_spec": { "imageurl": "harbor.local/adapted/langgraph:v0.3.1-mod1.3" },
     "image_module_version": "v1.3", "uploaded_by": "user-01",
     "created_at": "2026-07-07T15:05:00Z" }
@@ -352,26 +354,27 @@ X-Page-Size: 2
 
 #### 3.1.3 取运行规格
 
-gateway 拉起实例**前**查此拿元戎运行规格；不带 `version` 取框架默认版本。镜像管理据默认版本组合返回。
+gateway 拉起实例**前**查此拿元戎运行规格；不带 `version` 取该 `name` 的默认版本。镜像管理据默认版本组合返回。
 
-- **接口**：`GET /api/images/{framework}/launch-spec`（发起方：gateway）
-- **输入示例**：`GET …/images/opencode/launch-spec`（可选 `?version=v0.2.0`）
+- **接口**：`GET /api/images/{name}/launch-spec`（发起方：gateway）
+- **输入示例**：`GET …/images/openclaw/launch-spec`（可选 `?version=v0.2.0`）
 - **输出示例**：
   ```json
-  { "framework": "opencode", "framework_version": "v0.2.0",
-    "runtime_spec": { "imageurl": "harbor.local/adapted/opencode:v0.2.0-mod1.3",
-      "cpu": 1000, "memory": 2048, "ports": [ { "port": 8080, "protocol": "tcp" } ] },
+  { "name": "openclaw", "framework": "openclaw", "version": "v0.2.0",
+    "runtime_spec": { "imageurl": "harbor.local/adapted/openclaw:v0.2.0-mod1.3", "cpu": 1000, "memory": 2048 },
+    "access_mode": [ { "name": "tui", "port": "2222", "cmd": "openclaw" },
+                     { "name": "web", "port": "18789", "cmd": "openclaw gateway --port 18789" } ],
     "env_vars": { "A2X_LLM_KEY": "${A2X_LLM_KEY}" },
     "workspace": "/app",
     "mounts": [ { "source": "/data/agent", "target": "/data", "readonly": false } ],
     "image_module_version": "v1.3" }
   ```
-  > 均为**镜像级**字段，与 `POST /api/images` 登记时的形状一致（`runtime_spec` 原样返回）；gateway 拉起时再补**实例级**字段（`sandbox_type` / `host_user`=user / `name`=service_id / `lifecycle` / `idle_timeout`）。框架无默认版本时回退到 `version_key` 最大（最新）的一版。
+  > 均为**镜像级**字段，与 `POST /api/images` 登记时的形状一致（`runtime_spec` 原样返回，`access_mode` 供 gateway 选端口 / 命令）；gateway 拉起时再补**实例级**字段（`sandbox_type` / `host_user`=user / `name`=service_id / `lifecycle` / `idle_timeout`）。该 `name` 无默认版本时回退到 `version_key` 最大（最新）的一版。
 
 #### 3.1.4 设默认版本 / 3.1.5 镜像注销
 
-- **设默认版本**：`PUT /api/images/{framework}/default`（用户）。输入 `{ "framework_version": "v0.2.0" }` → 输出 `{ "framework": "opencode", "default": "v0.2.0", "status": "updated" }`。每框架恰有一行 `is_default=1`，改默认即「旧默认清零 + 新默认置一」。
-- **镜像注销**：`DELETE /api/images/{framework}/{version}`（用户）。**先校验无在用实例**（查实例注册表的 `framework` + `framework_version`），无则删镜像仓文件 + 删该版本条目；有在用则 `409`（响应体带 `code: image_in_use` 与在用实例列表）。删掉的若是默认版本，则把剩余版本中最新的一版自动提升为默认。输出 `{ "framework": "opencode", "framework_version": "v0.2.0", "status": "deregistered" }`。
+- **设默认版本**：`PUT /api/images/{name}/default`（用户）。输入 `{ "version": "v0.2.0" }` → 输出 `{ "name": "openclaw", "default": "v0.2.0", "status": "updated" }`。每 `name` 恰有一行 `is_default=1`，改默认即「旧默认清零 + 新默认置一」。
+- **镜像注销**：`DELETE /api/images/{name}/{version}`（用户）。**先校验无在用实例**（按该行 `framework` + `version` 查实例注册表），无则删镜像仓文件 + 删该版本条目；有在用则 `409`（响应体带 `code: image_in_use` 与在用实例列表）。删掉的若是默认版本，则把剩余版本中最新的一版自动提升为默认。输出 `{ "name": "openclaw", "version": "v0.2.0", "status": "deregistered" }`。
 
 ### 3.2 实例管理
 
@@ -410,35 +413,36 @@ flowchart TB
 
 本场景用到**两个接口**：先取运行规格（步骤 1），再注册实例（步骤 5）。
 
-**接口 ①（步骤 1）取运行规格**：`GET /api/images/{framework}/launch-spec`（发起方：gateway；同 [§3.1.3](#313-取运行规格)）
+**接口 ①（步骤 1）取运行规格**：`GET /api/images/{name}/launch-spec`（发起方：gateway；同 [§3.1.3](#313-取运行规格)）
 
 **接口 ②（步骤 5）注册实例**：`POST /api/instances`（发起方：gateway）
 
-- **必填字段**：`service_id` · `kind` · `framework` · `framework_version` · `node` · `address` · `user`
+- **必填字段**：`service_id` · `kind` · `framework` · `framework_version` · `node` · `address` · `user`；可选 `instance_id`（元戎实例 ID，gateway 回填）
 - **输入示例**：
   ```json
   { "service_id": "generic_3f9a1b2c", "kind": "三方", "framework": "opencode",
     "framework_version": "v0.2.0", "node": "192.168.0.12",
+    "instance_id": "yr-inst-7f3a92",
     "address": "10.244.1.7:4096", "user": "user-01" }
   ```
 - **输出示例**：
   ```json
   { "service_id": "generic_3f9a1b2c", "kind": "三方", "framework": "opencode",
     "framework_version": "v0.2.0", "address": "10.244.1.7:4096",
-    "node": "192.168.0.12", "user": "user-01",
+    "node": "192.168.0.12", "instance_id": "yr-inst-7f3a92", "user": "user-01",
     "created_at": "2026-07-06T10:00:00Z", "last_active_at": "2026-07-06T10:00:00Z",
     "status": "运行" }
   ```
-  > `service_id` 幂等：同 `service_id` 重发即 upsert 覆盖，`created_at` 保留首次值。`kind` 只接受 `三方` / `九问`，其余值 `400`。
+  > `service_id` 幂等：同 `service_id` 重发即 upsert 覆盖，`created_at` 保留首次值。`kind` 只接受 `三方` / `九问`，其余值 `400`。`instance_id` 由 gateway 回填、只记录不筛选。
 
 #### 3.2.2 实例变更 / 状态更新
 
 gateway 在落点变化（元戎迁移，`node` / `address` 改变）或**存活状态变化**（置 `停止` / `异常`，见 [§3.2.5](#325-存活监控)）时更新条目；`service_id` 不变。
 
 - **接口**：`PATCH /api/instances/{service_id}`（发起方：gateway）
-- **可改字段**：`node` / `address` / `status`（至少给一个，否则 `400`；`status` 只接受 `运行` / `停止` / `异常`）
+- **可改字段**：`node` / `address` / `instance_id` / `status`（至少给一个，否则 `400`；`status` 只接受 `运行` / `停止` / `异常`）
 - **输入示例**：`{ "status": "停止" }` 或 `{ "node": "192.168.0.20", "address": "10.244.3.9:4096" }`
-- **输出示例**：`{ "service_id": "generic_3f9a1b2c", "kind": "三方", "framework": "opencode", "framework_version": "v0.2.0", "address": "10.244.1.7:4096", "node": "192.168.0.12", "user": "user-01", "status": "停止" }`
+- **输出示例**：`{ "service_id": "generic_3f9a1b2c", "kind": "三方", "framework": "opencode", "framework_version": "v0.2.0", "address": "10.244.1.7:4096", "node": "192.168.0.12", "instance_id": "yr-inst-7f3a92", "user": "user-01", "status": "停止" }`
 
 #### 3.2.3 实例删除（用户手动）
 
@@ -767,40 +771,45 @@ A2X_REGISTRY_NGINX=192.168.0.11:4000
 
 ### 4.2 镜像注册表
 
-**注册表 `images`**（kind=image，物理表 `image`）：**一行 = 一个框架版本**（`framework` + `framework_version`）；`is_default` 标记该框架默认版本。
+**注册表 `images`**（kind=image，物理表 `image`）：**一行 = 一个 `name` 的一个 `version`**；主键定位用 **`name`**（`framework` 降为普通展示字段）；`is_default` 标记该 `name` 的默认版本。
 
 | 列 | 角色 | 说明 |
 |----|------|------|
 | `registry` | 主键 | 恒为 `images` |
-| `service_id` | 主键 | `image_sid(framework, framework_version)` = `image_` + sha256(`framework\|version`)[:16] |
-| `framework` | **热查列**（索引）| 按框架查 |
-| `framework_version` | **热查列**（索引）| 按版本查 |
-| `version_key` | **排序列**（索引）| `framework_version` 的**规范化排序键**，注册时算好落库；框架内按其**降序**排（新版本在前）|
-| `is_default` | **热查列** | `1` = 该框架默认版本（每框架恰一行 = 1）。**不参与排序** |
-| `uploaded_by` | **热查列**（索引）| 登记该版本的用户 ID（`POST /api/images` 的 `uploaded_by`）；供**按上传者筛选**。九问预置条目为 `system` |
-| `data` | JSON | `{runtime_spec, env_vars, workspace, mounts, image_module_version, created_at}`——`runtime_spec` 为**原样透传的不透明对象** |
+| `service_id` | 主键 | `image_sid(name, version)` = `image_` + sha256(`name\|version`)[:16] |
+| `name` | **热查列**（索引）| **主键定位字段**（取代 framework）；按 name 查 / 分组 / 定默认 |
+| `framework` | 展示列 | 普通字段，可筛选但**非主键**；不参与默认版本 / 排序 |
+| `version` | **热查列**（索引）| 镜像版本（原 `framework_version` 更名）|
+| `version_key` | **排序列**（索引）| `version` 的**规范化排序键**，注册时算好落库；同 name 内按其**降序**排（新版本在前）|
+| `is_default` | **热查列** | `1` = 该 name 的默认版本（每 name 恰一行 = 1）。**不参与排序** |
+| `uploaded_by` | **热查列**（索引）| 登记该版本的用户 ID；供**按上传者筛选**。九问预置条目为 `system` |
+| `data` | JSON | `{description, package_path, image_archive_path, runtime_spec, access_mode, env_vars, workspace, mounts, image_module_version, created_at}`——`runtime_spec` 为**原样透传的不透明对象**；`description/package_path/image_archive_path` 纯文本、`access_mode` 为 `{name,port,cmd}` 数组，均**只返回、不作筛选** |
+
+> **过渡**：`framework_version` 更名为 `version`，旧名在契约里过渡期保留（标 `deprecated`），落库以 `version` 为准。
 
 **`version_key` 派生规则**（注册时一次算好，之后只读）：
 
-| `framework_version` | `version_key` | 说明 |
+| `version` | `version_key` | 说明 |
 |---|---|---|
 | `v0.2.0` | `00000.00002.00000~` | 匹配 `v?<major>.<minor>.<patch>` → 各段补零到 5 位 |
 | `v0.10.0` | `00000.00010.00000~` | 补零后 `00010 > 00002`，正确排在 `v0.2.0` **之前** |
 | `v0.2.0-beta` | `00000.00002.00000-beta` | 预发布版；正式版尾缀 `~`（ASCII `0x7E`，大于任何字母与 `-`），故降序时**正式版排在同号预发布版之前** |
-| `nightly`（不合规）| `00000.00000.00000` | 解析失败兜底 → 排在该框架所有合规版本**之后**，组内按 `created_at` 降序 |
+| `nightly`（不合规）| `00000.00000.00000` | 解析失败兜底 → 排在该 name 所有合规版本**之后**，组内按 `created_at` 降序 |
 
-**示例行**（opencode 两版本）：
+**示例行**（openclaw 两版本；`name` = `framework` = openclaw）：
 
-| service_id | framework | framework_version | version_key | is_default | uploaded_by |
+| service_id | name | framework | version | version_key | is_default |
 |---|---|---|---|---|---|
-| `image_7c2a…` | opencode | v0.2.0 | `00000.00002.00000~` | 1 | user-01 |
-| `image_9b3f…` | opencode | v0.1.0 | `00000.00001.00000~` | 0 | user-01 |
+| `image_7c2a…` | openclaw | openclaw | v0.2.0 | `00000.00002.00000~` | 1 |
+| `image_9b3f…` | openclaw | openclaw | v0.1.0 | `00000.00001.00000~` | 0 |
 
 其中 `data`（v0.2.0）：
 
 ```json
-{ "runtime_spec": { "imageurl": "harbor.local/adapted/opencode:v0.2.0-mod1.3",
-    "cpu": 1000, "memory": 2048, "ports": [ { "port": 8080, "protocol": "tcp" } ] },
+{ "description": "xxxxxxxx", "package_path": "/xxx/xxx/", "image_archive_path": "/xxx/xxx/",
+  "runtime_spec": { "imageurl": "harbor.local/adapted/openclaw:v0.2.0-mod1.3", "cpu": 1000, "memory": 2048 },
+  "access_mode": [ { "name": "tui", "port": "2222", "cmd": "openclaw" },
+                   { "name": "web", "port": "18789", "cmd": "openclaw gateway --port 18789" } ],
   "env_vars": { "A2X_LLM_KEY": "${A2X_LLM_KEY}" },
   "workspace": "/app",
   "mounts": [ { "source": "/data/agent", "target": "/data", "readonly": false } ],
@@ -808,7 +817,7 @@ A2X_REGISTRY_NGINX=192.168.0.11:4000
   "created_at": "2026-07-06T10:00:00Z" }
 ```
 
-> **三种查询**：① framework → 默认版本 `WHERE framework=? AND is_default=1`；② framework+version `WHERE framework=? AND framework_version=?`；③ 全部（`GET /api/images`）**扁平返回**，一条目 = 一行（`framework` / `is_default` 是行上的普通字段，不做框架分组），`ORDER BY framework ASC, version_key DESC` + `LIMIT/OFFSET`——确定序见 [§3](#3-场景逻辑视图) 分页约定。`runtime_spec` 的内容对应**元戎 Docker 沙箱**（见 [openyuanrong 官方文档](https://docs.openyuanrong.org/)），注册中心不解析；gateway 经 **`GET …/launch-spec`**（[§3.1.3](#313-取运行规格)）拿组合规格，实例级字段拉起时拼接。表结构与索引见实现文档。
+> **三种查询**：① name → 默认版本 `WHERE name=? AND is_default=1`；② name+version `WHERE name=? AND version=?`；③ 全部（`GET /api/images`）**扁平返回**，一条目 = 一行（`name` / `framework` / `is_default` 是行上的普通字段，不做分组），`ORDER BY name ASC, version_key DESC` + `LIMIT/OFFSET`——确定序见 [§3](#3-场景逻辑视图) 分页约定。gateway 经 **`GET …/launch-spec`**（[§3.1.3](#313-取运行规格)）拿组合规格，实例级字段拉起时拼接。
 
 ### 4.3 实例注册表
 
@@ -823,14 +832,14 @@ A2X_REGISTRY_NGINX=192.168.0.11:4000
 | `framework` / `framework_version` | **热查列**（索引）| 镜像在用校验 |
 | `node` | **热查列**（索引）| 按节点查 |
 | `user` | **热查列**（索引）| **按用户 ID 查看该用户的实例**（SQL 中须加引号，`user` 是保留字）|
-| `data` | JSON | `{address, created_at, last_active_at}` |
+| `data` | JSON | `{address, instance_id, created_at, last_active_at}`——`instance_id` = **元戎实例 ID**（gateway 拉起后回填；非元戎拉起可空、不做主键、只返回不筛选）|
 
 **示例行**：
 
 | registry | service_id | kind | status | framework | framework_version | node | user | data |
 |---|---|---|---|---|---|---|---|---|
-| instances | `generic_3f9a…` | 三方 | 运行 | opencode | v0.2.0 | 192.168.0.12 | user-01 | `{"address":"10.244.1.7:4096","created_at":"2026-07-06T10:00:00Z","last_active_at":"2026-07-06T10:42:00Z"}` |
-| instances | `generic_5c7e…` | 三方 | 停止 | langgraph | v0.3.0 | 192.168.0.13 | user-03 | `{"address":"10.244.3.4:4096","created_at":"…","last_active_at":"…"}` |
+| instances | `generic_3f9a…` | 三方 | 运行 | opencode | v0.2.0 | 192.168.0.12 | user-01 | `{"address":"10.244.1.7:4096","instance_id":"yr-inst-7f3a92","created_at":"2026-07-06T10:00:00Z","last_active_at":"2026-07-06T10:42:00Z"}` |
+| instances | `generic_5c7e…` | 三方 | 停止 | langgraph | v0.3.0 | 192.168.0.13 | user-03 | `{"address":"10.244.3.4:4096","instance_id":"yr-inst-2b5c41","created_at":"…","last_active_at":"…"}` |
 
 > **gateway 写、用户删**：gateway 经元戎拉起后注册（`status=运行`），落点变化时改 `node` / `address`，据元戎 List 把不在运行的置 `停止` / `异常`（[§3.2.5](#325-存活监控)）；`node` = 元戎落点 nodeIP（可能非发起方所在一体机）。**条目不随实例停止删除**，仅用户手动 `DELETE` 删。**查询顺序**：`framework ASC, "user" ASC, service_id ASC`（`service_id` 为主键，兜底保证全序——分页所需）。
 
@@ -840,7 +849,7 @@ A2X_REGISTRY_NGINX=192.168.0.11:4000
 
 | 材料 | 位置 | 内容 |
 |------|------|------|
-| **本次需求变更** | [`需求变更.md`](./需求变更.md) | 2026-08-11 需求变更（mTLS / 心跳→轮询元戎 / status 落库 / etcd 兼容） |
+| **本次需求变更** | [`需求变更.md`](./需求变更.md) | 08-11 批（mTLS / 心跳→轮询元戎 / status 落库 / etcd 兼容）+ 08-27 批（实例加 instance_id / 镜像 name 主键） |
 | **ETCD 兼容分析** | [`ETCD兼容分析.md`](./ETCD兼容分析.md) | rqlite / etcd 双支持的可行性、抽象接口与工作量（可选后端·规划） |
 | **接口契约（OpenAPI）** | [`registry_openapi.yaml`](./registry_openapi.yaml) | 全部 REST 接口的请求 / 响应 / 错误 / schema（OpenAPI 3.0）——§3 各场景的接口在此有完整定义 |
 | **开发进展** | [`开发进展.md`](./开发进展.md) | **当前版本 B020** 的实现情况：已实现 / 开发中 / 未实现 / 与本设计的差异 / 已知风险 |
