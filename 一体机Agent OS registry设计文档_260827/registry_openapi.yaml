@@ -292,7 +292,7 @@ paths:
       - name: service_id
         in: path
         required: true
-        description: 实例主键（= `user+framework`）；**DELETE 可传 `ALL`** 表示全部（配合 user/framework/node 过滤收窄）
+        description: 实例主键（= `user+framework`）；**DELETE 可传 `ALL`** 表示全部（暂不提供过滤）
         schema: { type: string, example: user-01+opencode }
     patch:
       tags: [instances]
@@ -316,29 +316,14 @@ paths:
       summary: 删除实例（模式 B 调元戎删除 + 模式 A 仅删条目；支持 ALL 批量）
       description: >
         **带 `with_runtime=true` → 模式 B**（先按条目 `instance_id` 调元戎 `delete_sandbox`，成功后删条目）；
-        无 → **模式 A**（仅删条目，向前兼容）。`{service_id}` = 具体 id 删一个；= `ALL` 删全部，可用
-        user/framework/node 过滤收窄。批量部分失败**不回滚、逐条报结果**。幂等：条目不存在 `deleted=false`。
+        无 → **模式 A**（仅删条目，向前兼容）。`{service_id}` = 具体 id 删一个；= `ALL` 删**全部**（暂不提供过滤）。
+        批量部分失败**不回滚、逐条报结果**。幂等：条目不存在 `deleted=false`。
       parameters:
         - name: with_runtime
           in: query
           required: false
           description: true → 同步调元戎删除实例；缺省仅删条目
           schema: { type: boolean, default: false }
-        - name: user
-          in: query
-          required: false
-          description: ALL 时按用户收窄
-          schema: { type: string, example: user-01 }
-        - name: framework
-          in: query
-          required: false
-          description: ALL 时按框架收窄
-          schema: { type: string, example: opencode }
-        - name: node
-          in: query
-          required: false
-          description: ALL 时按节点收窄
-          schema: { type: string, example: 192.168.0.12 }
       responses:
         '200':
           description: 单个 → InstanceDeleteResponse；ALL / 批量 → BatchDeleteResponse

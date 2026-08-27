@@ -457,10 +457,10 @@ gateway 在落点变化（元戎迁移，`node` / `address` 改变）或**存活
 
 Agent 条目**不随实例停止消失**：`status` 置 `停止` / `异常`（[§3.2.5](#325-存活监控)）时条目仍在。删除**由用户经 UI 手动发起**，同样支持两种模式。
 
-- **接口**：`DELETE /api/instances/{service_id}[?with_runtime=true][&user=&framework=&node=]`（发起方：**用户**）
+- **接口**：`DELETE /api/instances/{service_id}[?with_runtime=true]`（发起方：**用户**）
 - **判模式**：带 `with_runtime=true` → **模式 B**（先按条目 `instance_id` 调元戎 `delete_sandbox`，成功后删条目）；无 → **模式 A**（仅删条目）。
-- **范围**：`{service_id}` = 具体 id 删一个；= `ALL` 删全部，可用 `user`/`framework`/`node` 过滤收窄。批量部分失败**不回滚、逐条报结果**。
-- **输入示例**：`DELETE …/instances/user-01+opencode?with_runtime=true` ／ `DELETE …/instances/ALL?user=user-01`
+- **范围**：`{service_id}` = 具体 id 删一个；= `ALL` 删**全部**（暂不提供过滤）。批量部分失败**不回滚、逐条报结果**。
+- **输入示例**：`DELETE …/instances/user-01+opencode?with_runtime=true` ／ `DELETE …/instances/ALL`
 - **输出示例**：单个 `{ "service_id": "user-01+opencode", "deleted": true, "runtime_deleted": true }`；ALL/批量 `{ "total": 3, "deleted": 2, "results": [ … ] }`（幂等：已删则 `deleted: false`）
 
 #### 3.2.4 实例查询

@@ -196,7 +196,7 @@ def query(self, filters=None, size=-1, page=1) -> tuple[list[dict], int]:
 |------|------|
 | `register_instance(entry) -> dict` | **模式 A**：幂等 upsert 写条目（`service_id`/`kind`/…/可选 `instance_id`）。**模式 B**：先 in-flight 锁（同 `service_id` 在途 → `409 in_progress`）→ 已存在且活则回现有条目 → 否则经 `RuntimeManager` 调元戎创建、`get_agent_info` 回填 `node`/`address`/`instance_id` → **成功后**写条目（写失败重试 N 次仍失败报错+记日志）|
 | `update_instance(sid, fields) -> dict` | **变更**：部分更新 `node`/`address`/`instance_id`（经 `register.patch`）；不存在则 `404` |
-| `deregister_instance(sid, with_runtime, filters) -> dict` | 单个 / `ALL`（按 `filters` 收窄）。**模式 B**（`with_runtime`）：按条目 `instance_id` 调元戎 `delete_sandbox` 成功后删条目；批量 `asyncio.gather` 限流、逐条报结果、部分失败不回滚 |
+| `deregister_instance(sid, with_runtime) -> dict` | 单个 / `ALL`（删全部，暂不提供过滤）。**模式 B**（`with_runtime`）：按条目 `instance_id` 调元戎 `delete_sandbox` 成功后删条目；批量 `asyncio.gather` 限流、逐条报结果、部分失败不回滚 |
 | `list_instances(filter, include_unhealthy, size, page) -> (list[dict], int)` | 查询 + 据 node 心跳派生 `status`；`include_unhealthy=false` 只回 `运行`。排序 `framework, "user", service_id`；**先过滤后分页**，返回 `(条目, 过滤后总数)` |
 | `expire_node(node) -> None` | 心跳注入：删该 node 全部实例（过宽限）|
 
@@ -208,7 +208,7 @@ def query(self, filters=None, size=-1, page=1) -> tuple[list[dict], int]:
 |------|------|
 | `POST /api/instances` | `register_instance`（有 `runtime_spec` → 模式 B 调元戎）|
 | `PATCH /api/instances/{sid}` | `update_instance`（node/address/instance_id/status 变更）|
-| `DELETE /api/instances/{sid}` | `deregister_instance`（`?with_runtime` → 模式 B；`{sid}=ALL`+`?user/framework/node` 批量）|
+| `DELETE /api/instances/{sid}` | `deregister_instance`（`?with_runtime` → 模式 B；`{sid}=ALL` 删全部，暂不提供过滤）|
 | `GET /api/instances` | `list_instances`（`?include_unhealthy`/`?node`/`?framework`/`?kind`/`?user`/`?size`/`?page`）|
 
 **`instance/runtime.py`【新增】—— 元戎运行时客户端 + 编排**（复用 jiuwenswarm 模式）：
