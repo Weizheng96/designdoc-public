@@ -188,41 +188,67 @@ def query(self, filters=None, size=-1, page=1) -> tuple[list[dict], int]:
 
 ### 2.5 instance（实例管理）
 
-**功能**：实例注册 / 变更 / 注销 / 查询。**纯记录方，不调元戎、不做 get-or-create**：gateway 自行决定拉起、带落点写入；落点变化经变更更新；查询时据 node 心跳派生 `status`。启动时 `create_registry("实例注册表", "instance")`，之后经注册管理对**命名注册表 `实例注册表`** 读写（表结构见 [§3.2](#32-表结构)）。node 过宽限策略（删该 node 实例）注入给心跳模块。
+**功能**：实例创建 / 注册 / 变更 / 删除 / 查询。**支持两种模式**（[需求变更 §7](./需求变更.md)）：**模式 B** 注册中心自己调元戎 `create_sandbox` / `delete_sandbox` 拉起 / 停止后再增 / 删条目；**模式 A**（向前兼容）仅登记 / 删除条目。判模式看形状（POST 有无 `runtime_spec`、DELETE 有无 `with_runtime`）。启动时 `create_registry("实例注册表", "instance")`，之后经注册管理读写（表结构见 [§3.2](#32-表结构)）。
 
 **接口**（`instance/service.py`）：
 
 | 函数 | 功能 |
 |------|------|
-| `register_instance(entry) -> dict` | 幂等 upsert：写 `service_id`/`kind`/`framework`/`framework_version`/`node`/`address`/`user`，及可选 `instance_id`（元戎实例 ID）（均 gateway 提供；`service_id` 由 (user, framework) 派生）|
+| `register_instance(entry) -> dict` | **模式 A**：幂等 upsert 写条目（`service_id`/`kind`/…/可选 `instance_id`）。**模式 B**：先 in-flight 锁（同 `service_id` 在途 → `409 in_progress`）→ 已存在且活则回现有条目 → 否则经 `RuntimeManager` 调元戎创建、`get_agent_info` 回填 `node`/`address`/`instance_id` → **成功后**写条目（写失败重试 N 次仍失败报错+记日志）|
 | `update_instance(sid, fields) -> dict` | **变更**：部分更新 `node`/`address`/`instance_id`（经 `register.patch`）；不存在则 `404` |
-| `deregister_instance(sid) -> None` | 删条目（幂等；元戎停止由 gateway 完成）|
-| `list_instances(filter, include_unhealthy, size, page) -> (list[dict], int)` | 查询 + 据 node 心跳派生 `status`；`include_unhealthy=false` 只回 `运行`。排序 `framework, "user", service_id`；**先过滤后分页**，返回 `(条目, 过滤后总数)` 供路由写 `X-Total-Count` |
+| `deregister_instance(sid, with_runtime, filters) -> dict` | 单个 / `ALL`（按 `filters` 收窄）。**模式 B**（`with_runtime`）：按条目 `instance_id` 调元戎 `delete_sandbox` 成功后删条目；批量 `asyncio.gather` 限流、逐条报结果、部分失败不回滚 |
+| `list_instances(filter, include_unhealthy, size, page) -> (list[dict], int)` | 查询 + 据 node 心跳派生 `status`；`include_unhealthy=false` 只回 `运行`。排序 `framework, "user", service_id`；**先过滤后分页**，返回 `(条目, 过滤后总数)` |
 | `expire_node(node) -> None` | 心跳注入：删该 node 全部实例（过宽限）|
-| `_derive_status(entry) -> str` | `"异常" if hb.is_expired(entry["node"]) else "运行"` |
 
-**REST**（`instance/router.py`）：
+`service_id = "{user}+{framework}"`（首个 `+` 拆回），`kind` 由 `framework == "jiuwenswarm"`（jiuwenswarm `BUILTIN_AGENT_TYPE`）判。
+
+**REST**（`instance/router.py`，POST/DELETE 均 `async def`）：
 
 | 端点 | 映射 |
 |------|------|
-| `POST /api/instances` | `register_instance`（gateway，拉起后注册）|
-| `PATCH /api/instances/{sid}` | `update_instance`（gateway，node/address 变更）|
-| `DELETE /api/instances/{sid}` | `deregister_instance`（gateway，注销）|
-| `GET /api/instances` | `list_instances`（用户，`?include_unhealthy` / `?node` / `?framework` / `?kind` / `?user` / `?size` / `?page`；分页元数据走响应头）|
+| `POST /api/instances` | `register_instance`（有 `runtime_spec` → 模式 B 调元戎）|
+| `PATCH /api/instances/{sid}` | `update_instance`（node/address/instance_id/status 变更）|
+| `DELETE /api/instances/{sid}` | `deregister_instance`（`?with_runtime` → 模式 B；`{sid}=ALL`+`?user/framework/node` 批量）|
+| `GET /api/instances` | `list_instances`（`?include_unhealthy`/`?node`/`?framework`/`?kind`/`?user`/`?size`/`?page`）|
+
+**`instance/runtime.py`【新增】—— 元戎运行时客户端 + 编排**（复用 jiuwenswarm 模式）：
+
+| 项 | 说明 |
+|----|------|
+| `RuntimeManager.create(name, workspace, version, runtime_spec, env_vars, mounts) -> dict` | 移植 jiuwenswarm `YuanrongFrontendAgentClient`：`urllib` 打 `POST /api/agent`（**零新依赖**，与 rqlite/etcd 客户端一致）、`asyncio.to_thread` 不阻塞事件循环、超时 300s、`code==200` 校验 → 返回 `instance_id`；再 `get_agent_info`（`GET /api/agent/:id`）取 `node_ip`/`sandbox_ip` |
+| `RuntimeManager.delete(instance_id)` | `DELETE /api/agent/:id`（同上包 `to_thread`）|
+| in-flight 锁 | `dict[service_id, asyncio.Lock/Task]`；同 `service_id` 同时刻仅一个在途操作，其余 `409` |
+| 配置 | 新增 env：元戎 `frontend_endpoint` + `namespace`（registry 配置优先）+ 超时；未配则模式 B 返回 `501 runtime_not_configured` |
+
+下面 `_write_entry` 是两模式共用的**条目写入核心**；模式 B 在其外层加「元戎调用 + 回填 + 重试」编排：
 
 ```python
-def register_instance(self, entry) -> dict:
+def _write_entry(self, entry) -> dict:                     # 两模式共用
     now = now_iso()
     row = {"service_id": entry["service_id"], "kind": entry["kind"],
            "framework": entry["framework"], "framework_version": entry["framework_version"],
            "node": entry["node"], "address": entry["address"], "user": entry["user"],
-           "instance_id": entry.get("instance_id"),       # 元戎实例 ID（可空）
+           "instance_id": entry.get("instance_id"),
            "created_at": now, "last_active_at": now}
     return self.register.register("实例注册表", row)        # 幂等 upsert
 
-def update_instance(self, service_id, fields) -> dict:     # 变更：node/address/instance_id
-    return self.register.patch("实例注册表", service_id,
-                               {k: fields[k] for k in ("node", "address", "instance_id") if k in fields})
+async def register_instance(self, req) -> dict:
+    if "runtime_spec" not in req:                          # 无 runtime_spec → 模式 A
+        return self._write_entry(req)
+    sid = req["name"]                                      # = user+framework
+    user, framework = sid.split("+", 1)                   # 首个 + 拆
+    async with self._inflight(sid):                       # 同 sid 在途 → 409 in_progress
+        cur = self.register.query("实例注册表", {"service_id": sid})
+        if cur and self._alive(cur[0]):                   # 已存在且活 → 幂等
+            return cur[0]
+        iid = await self._rt.create(sid, req["workspace"], req["runtime_spec"],
+                                    req.get("env_vars"), req.get("mounts"))  # 元戎成功才继续
+        node, addr = await self._rt.get_landing(iid)      # get_agent_info 回填
+        entry = {"service_id": sid, "user": user, "framework": framework,
+                 "kind": "九问" if framework == BUILTIN_AGENT_TYPE else "三方",
+                 "framework_version": req["version"], "node": node,
+                 "address": addr, "instance_id": iid}
+        return self._retry(lambda: self._write_entry(entry), n=N)  # 写失败重试 N 次
 ```
 
 **`status` 与分页的相互作用**（易错点）：`status` 不落库、由 node 心跳在**内存**派生，所以 `include_unhealthy=false` 的过滤**不能**「先全量捞出 → 逐行派生 status → 内存过滤 → 再切片」——那样 `LIMIT/OFFSET` 就形同虚设，`X-Total-Count` 也得靠内存数。

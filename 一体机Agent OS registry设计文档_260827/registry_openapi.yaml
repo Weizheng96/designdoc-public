@@ -15,7 +15,7 @@ info:
     - 响应体：回执 {…, status:"registered"|"updated"|"deregistered"} 或 {…, deleted:bool} 风格
       （镜像 / 实例不分 dataset，回执不含 dataset 字段）。
 
-    - 错误：404 资源不存在、400 校验失败、403 越权、409 冲突（镜像在用）、502 外部依赖（元戎）失败。
+    - 错误：404 不存在、400 校验、409 冲突（镜像在用 / 实例在途 in_progress）、501 元戎未配置、502 元戎失败、504 元戎超时。
 
     - 传输：内部组件间 **mTLS 双向认证** + HTTP/1.1 keep-alive（未配证书则纯 http）。
 
@@ -222,21 +222,40 @@ paths:
                 items: { $ref: '#/components/schemas/InstanceEntry' }
     post:
       tags: [instances]
-      summary: 注册实例（三方 / 九问统一）
+      summary: 创建 / 注册实例（模式 B 调元戎 + 模式 A 仅登记）
       description: >
-        gateway 提供全部字段并注册（注册中心不调元戎）：经 GET …/launch-spec 拿运行规格、自行调元戎拉起后，
-        带 kind/framework/framework_version/node/address 确认注册。三方与九问同一套流程，
-        仅九问框架镜像注册表条目随一体机预置。service_id 幂等：重发即 upsert 覆盖。
+        **按请求体形状判模式**：带 `runtime_spec` → **模式 B**（registry 调元戎 `create_sandbox` 创建、
+        拿 `instance_id` 后再 `get_agent_info` 取落点，全部拿齐后写条目）；无 `runtime_spec`、带 `node`/`address`
+        → **模式 A**（向前兼容，仅登记）。模式 B：`service_id = name = "user+framework"`（首个 `+` 拆 user/framework）、
+        `kind` 由 `framework == "jiuwenswarm"` 判、`node`/`address`/`instance_id` 元戎回填、`version` 必填。
+        同 `service_id` 在途操作互斥（`409 in_progress`）；条目已存在且实例存活则**幂等回现有条目、不二次拉起**。
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/RegisterInstanceRequest' }
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/CreateInstanceRuntimeRequest'   # 模式 B（有 runtime_spec）
+                - $ref: '#/components/schemas/RegisterInstanceRequest'         # 模式 A（无 runtime_spec，向前兼容）
             examples:
-              三方:
-                summary: 三方（镜像经镜像处理模块注册）
+              模式B:
+                summary: 模式 B —— registry 调元戎创建（入参 = 元戎 payload + version）
                 value:
-                  service_id: generic_3f9a1b2c
+                  name: user-01+opencode
+                  workspace: /app
+                  version: v0.2.0
+                  runtime_spec:
+                    runtime: python3.11
+                    sandbox_type: docker
+                    rootfs: { imageurl: harbor.local/adapted/opencode:v0.2.0-mod1.3, user: agentos }
+                    cpu: 1000
+                    memory: 2048
+                  env_vars: { A2X_LLM_KEY: "${A2X_LLM_KEY}" }
+                  mounts: [ { source: /data/agent, target: /data, readonly: false } ]
+              模式A:
+                summary: 模式 A —— 仅登记条目（向前兼容，实例已由 gateway 拉起）
+                value:
+                  service_id: user-01+opencode
                   kind: 三方
                   framework: opencode
                   framework_version: v0.2.0
@@ -244,58 +263,37 @@ paths:
                   instance_id: yr-inst-7f3a92
                   address: 10.244.1.7:4096
                   user: user-01
-              九问:
-                summary: 九问（框架镜像预置，流程同三方）
-                value:
-                  service_id: generic_9c21d4e5
-                  kind: 九问
-                  framework: jiuwen-report
-                  framework_version: v1.0.0
-                  node: 192.168.0.11
-                  instance_id: yr-inst-2b5c41
-                  address: 10.244.2.3:8080
-                  user: user-02
       responses:
         '200':
-          description: 实例条目（status 落库，注册即 运行）
+          description: 实例条目（status 落库，注册即 运行；模式 B 的 node/address/instance_id 由元戎回填）
           content:
             application/json:
               schema: { $ref: '#/components/schemas/InstanceEntry' }
-              examples:
-                三方:
-                  value:
-                    service_id: generic_3f9a1b2c
-                    kind: 三方
-                    framework: opencode
-                    framework_version: v0.2.0
-                    address: 10.244.1.7:4096
-                    node: 192.168.0.12
-                    instance_id: yr-inst-7f3a92
-                    user: user-01
-                    created_at: "2026-07-06T10:00:00Z"
-                    last_active_at: "2026-07-06T10:00:00Z"
-                    status: 运行
-                九问:
-                  value:
-                    service_id: generic_9c21d4e5
-                    kind: 九问
-                    framework: jiuwen-report
-                    framework_version: v1.0.0
-                    address: 10.244.2.3:8080
-                    node: 192.168.0.11
-                    instance_id: yr-inst-2b5c41
-                    user: user-02
-                    created_at: "2026-07-06T09:30:00Z"
-                    last_active_at: "2026-07-06T09:30:00Z"
-                    status: 运行
+              example:
+                service_id: user-01+opencode
+                kind: 三方
+                framework: opencode
+                framework_version: v0.2.0
+                address: 10.244.1.7:4096
+                node: 192.168.0.12
+                instance_id: yr-inst-7f3a92
+                user: user-01
+                created_at: "2026-07-06T10:00:00Z"
+                last_active_at: "2026-07-06T10:00:00Z"
+                status: 运行
         '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/InProgress' }
+        '501': { $ref: '#/components/responses/RuntimeNotConfigured' }
+        '502': { $ref: '#/components/responses/YuanrongFailed' }
+        '504': { $ref: '#/components/responses/YuanrongTimeout' }
 
   /api/instances/{service_id}:
     parameters:
       - name: service_id
         in: path
         required: true
-        schema: { type: string, example: generic_3f9a1b2c }
+        description: 实例主键（= `user+framework`）；**DELETE 可传 `ALL`** 表示全部（配合 user/framework/node 过滤收窄）
+        schema: { type: string, example: user-01+opencode }
     patch:
       tags: [instances]
       summary: 变更实例 / 状态更新（node / address / instance_id / status）
@@ -315,14 +313,56 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
     delete:
       tags: [instances]
-      summary: 注销实例（删注册条目；元戎停止由 gateway 完成）
+      summary: 删除实例（模式 B 调元戎删除 + 模式 A 仅删条目；支持 ALL 批量）
+      description: >
+        **带 `with_runtime=true` → 模式 B**（先按条目 `instance_id` 调元戎 `delete_sandbox`，成功后删条目）；
+        无 → **模式 A**（仅删条目，向前兼容）。`{service_id}` = 具体 id 删一个；= `ALL` 删全部，可用
+        user/framework/node 过滤收窄。批量部分失败**不回滚、逐条报结果**。幂等：条目不存在 `deleted=false`。
+      parameters:
+        - name: with_runtime
+          in: query
+          required: false
+          description: true → 同步调元戎删除实例；缺省仅删条目
+          schema: { type: boolean, default: false }
+        - name: user
+          in: query
+          required: false
+          description: ALL 时按用户收窄
+          schema: { type: string, example: user-01 }
+        - name: framework
+          in: query
+          required: false
+          description: ALL 时按框架收窄
+          schema: { type: string, example: opencode }
+        - name: node
+          in: query
+          required: false
+          description: ALL 时按节点收窄
+          schema: { type: string, example: 192.168.0.12 }
       responses:
         '200':
-          description: 已删除（幂等：已删则 deleted=false）
+          description: 单个 → InstanceDeleteResponse；ALL / 批量 → BatchDeleteResponse
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/InstanceDeleteResponse' }
-              example: { service_id: generic_3f9a1b2c, deleted: true }
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/InstanceDeleteResponse'
+                  - $ref: '#/components/schemas/BatchDeleteResponse'
+              examples:
+                单个:
+                  value: { service_id: user-01+opencode, deleted: true, runtime_deleted: true }
+                批量:
+                  value:
+                    total: 3
+                    deleted: 2
+                    results:
+                      - { service_id: user-01+opencode, deleted: true }
+                      - { service_id: user-02+aider, deleted: true }
+                      - { service_id: user-03+crewai, deleted: false, error: "yuanrong timeout" }
+        '409': { $ref: '#/components/responses/InProgress' }
+        '501': { $ref: '#/components/responses/RuntimeNotConfigured' }
+        '502': { $ref: '#/components/responses/YuanrongFailed' }
+        '504': { $ref: '#/components/responses/YuanrongTimeout' }
 
   # ── 分布式高可用（后续版本）──────────────────────────────────────────
   /api/ha/members:
@@ -425,6 +465,30 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/ImageInUseError' }
           example: { code: image_in_use, detail: "2 个实例仍在用", instances: [inst_3f9a, inst_5b2c] }
+    InProgress:
+      description: 同 service_id 有在途创建 / 删除，拒绝并发（模式 B）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { code: in_progress, detail: "service_id user-01+opencode 正在创建 / 删除" }
+    RuntimeNotConfigured:
+      description: 模式 B 请求但未配置元戎连接
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { code: runtime_not_configured, detail: "未配置元戎 frontend_endpoint" }
+    YuanrongFailed:
+      description: 元戎创建 / 删除失败（外部依赖）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { code: yuanrong_failed, detail: "agent API failed: code=500" }
+    YuanrongTimeout:
+      description: 元戎创建 / 删除超时
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { code: yuanrong_timeout, detail: "yuanrong timeout after 300s" }
 
   schemas:
     # ── 镜像运行规格（元戎 Docker 沙箱）──
@@ -592,6 +656,27 @@ components:
         instance_id: { type: string, description: 元戎实例 ID（gateway 拉起后回填；非元戎拉起可空、不做主键）, example: yr-inst-7f3a92 }
         address: { type: string, description: 实例访问地址, example: 10.244.1.7:4096 }
         user: { type: string, description: 创建 / 所属用户, example: user-01 }
+    CreateInstanceRuntimeRequest:
+      type: object
+      description: >
+        模式 B 创建实例（= 元戎 create payload + version）。registry 据此调元戎 create_sandbox、
+        get_agent_info 后写条目。service_id = name（首个 + 拆 user/framework）、kind 由 framework 判、
+        node/address/instance_id 元戎回填。**有无 runtime_spec 是与模式 A 的判据**。
+      required: [name, workspace, version, runtime_spec]
+      properties:
+        name: { type: string, description: 实例主键 = user+framework（= 元戎 name）, example: user-01+opencode }
+        workspace: { type: string, description: 绝对路径, example: /app }
+        version: { type: string, description: 镜像版本（注册中心专属，注销校验用）, example: v0.2.0 }
+        namespace: { type: string, description: 元戎命名空间（可选；registry 配置优先）, example: default }
+        runtime_spec:
+          type: object
+          additionalProperties: true
+          description: 元戎 Docker 沙箱运行规格（runtime / rootfs.imageurl / sandbox_type / cpu / memory / cmds…），原样转发
+        env_vars:
+          type: object
+          additionalProperties: { type: string }
+          example: { A2X_LLM_KEY: "${A2X_LLM_KEY}" }
+        mounts: { type: array, items: { $ref: '#/components/schemas/Mount' } }
     InstanceEntry:
       type: object
       description: 实例注册条目（Agent 条目）；status 为落库的生命周期值，由 gateway 据元戎 List 写入
@@ -609,9 +694,25 @@ components:
         status: { type: string, enum: [运行, 停止, 异常] }
     InstanceDeleteResponse:
       type: object
+      description: 单个删除回执
       properties:
         service_id: { type: string }
         deleted: { type: boolean }
+        runtime_deleted: { type: boolean, description: 模式 B 时元戎实例是否已删 }
+    BatchDeleteResponse:
+      type: object
+      description: ALL / 批量删除逐条结果（部分失败不回滚）
+      properties:
+        total: { type: integer, example: 3 }
+        deleted: { type: integer, example: 2 }
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              service_id: { type: string }
+              deleted: { type: boolean }
+              error: { type: string }
 
     # ── HA ──
     HAMembers:
@@ -630,6 +731,7 @@ components:
     Error:
       type: object
       properties:
+        code: { type: string, description: 错误码（如 in_progress / runtime_not_configured / yuanrong_failed / yuanrong_timeout；可空）}
         detail: { type: string }
     ImageInUseError:
       type: object

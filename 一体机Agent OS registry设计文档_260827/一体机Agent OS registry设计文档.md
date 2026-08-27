@@ -378,11 +378,16 @@ gateway 拉起实例**前**查此拿元戎运行规格；不带 `version` 取该
 
 ### 3.2 实例管理
 
-Agent 实例（三方 / 九问）的注册 / 变更 / 查询 / **状态更新**，以及**用户手动删除**。**gateway 自行决定是否拉起**（不查注册中心）：拉起前经 [§3.1.3](#313-取运行规格) 取运行规格 → 自行调元戎拉起 → 向注册中心**注册**（`status` 初始 `运行`）；落点变化时**变更**；停止 / 异常时把 `status` 置 `停止` / `异常`（**不删条目**，见 [§3.2.5](#325-存活监控)）。**用户**查询实例、并手动**删除**不再需要的 Agent 条目。三方与九问同一套流程，仅九问框架镜像条目预置。**注册中心不调元戎**，是纯记录方。
+Agent 实例（三方 / 九问）的创建 / 注册 / 变更 / 查询 / **状态更新**，以及**用户手动删除**。创建 / 删除支持**两种模式**（见 [需求变更 §7](./需求变更.md)）：
 
-#### 3.2.1 实例注册
+- **模式 B（新默认）**：gateway 取运行规格 → 调注册中心「创建+注册」→ **注册中心调元戎** `create_sandbox` 拉起、`get_agent_info` 取落点 → 拿齐后写条目（`status` 初始 `运行`）。删除对称：注册中心调元戎 `delete_sandbox` → 删条目。
+- **模式 A（向前兼容，后续可移除）**：gateway 自行调元戎拉起 / 停止，注册中心**仅登记 / 删除条目**、不碰元戎。
 
-gateway 取运行规格 → 自行调元戎拉起、取落点 node / address → 向实例管理注册（写条目）。
+**判模式看形状**：POST 带 `runtime_spec` → B、否则 A；DELETE 带 `with_runtime=true` → B、否则 A。落点 / 异常时把 `status` 置 `停止` / `异常`（**不删条目**，见 [§3.2.5](#325-存活监控)）。**用户**查询实例、并手动**删除**不再需要的 Agent 条目。三方与九问同一套流程（注册中心**不区分类型、哑转发规格**，`kind` 由 `name` 判），仅九问框架镜像条目预置。
+
+#### 3.2.1 实例创建 / 注册（模式 B）
+
+gateway 取运行规格 → 组装元戎 payload → 调注册中心「创建+注册」→ **注册中心调元戎拉起、取落点 → 写条目**。
 
 ```mermaid
 flowchart TB
@@ -401,39 +406,43 @@ flowchart TB
     GW -->|1 GET …/launch-spec| BE
     BE --> IM --> RM --> ADP
     BE -->|2 运行规格| GW
-    GW -->|3 元戎拉起| YR
-    YR -->|4 运行| A
-    GW -->|5 POST …/instances 带 node/address| BE
-    BE --> AM --> RM --> AINST
+    GW -->|3 POST …/instances 带 runtime_spec+version| BE
+    BE --> AM -->|4 create_sandbox| YR
+    YR -->|5 运行 + instance_id| A
+    AM -->|6 get_agent_info 取 node/address| YR
+    AM --> RM --> AINST
+    BE -->|7 条目 已回填落点| GW
     classDef mod fill:#dbeafe,stroke:#3b82f6,color:#111
     classDef reg fill:#f0fdf4,stroke:#16a34a,color:#111
     classDef ext fill:#eeeeee,stroke:#888,color:#111
     style REG fill:#f3e8ff,stroke:#a855f7
 ```
 
-本场景用到**两个接口**：先取运行规格（步骤 1），再注册实例（步骤 5）。
+本场景用到**两个接口**：先取运行规格（步骤 1），再创建+注册实例（步骤 3；注册中心内部完成 4–6）。
 
 **接口 ①（步骤 1）取运行规格**：`GET /api/images/{name}/launch-spec`（发起方：gateway；同 [§3.1.3](#313-取运行规格)）
 
-**接口 ②（步骤 5）注册实例**：`POST /api/instances`（发起方：gateway）
+**接口 ②（步骤 3）创建+注册实例**：`POST /api/instances`（发起方：gateway）
 
-- **必填字段**：`service_id` · `kind` · `framework` · `framework_version` · `node` · `address` · `user`；可选 `instance_id`（元戎实例 ID，gateway 回填）
-- **输入示例**：
+- **模式 B 入参**（带 `runtime_spec` → 判为 B）= **元戎 create payload + `version`**：`name`（= `user+framework`）· `workspace` · `version` · `runtime_spec` · 可选 `env_vars` / `mounts` / `namespace`。`service_id`/`user`/`framework` 拆 `name`（首个 `+`），`kind` 由 `framework=="jiuwenswarm"` 判，`node`/`address`/`instance_id` 元戎回填。
+- **输入示例**（模式 B）：
   ```json
-  { "service_id": "generic_3f9a1b2c", "kind": "三方", "framework": "opencode",
-    "framework_version": "v0.2.0", "node": "192.168.0.12",
-    "instance_id": "yr-inst-7f3a92",
-    "address": "10.244.1.7:4096", "user": "user-01" }
+  { "name": "user-01+opencode", "workspace": "/app", "version": "v0.2.0",
+    "runtime_spec": { "runtime": "python3.11", "sandbox_type": "docker",
+      "rootfs": { "imageurl": "harbor.local/adapted/opencode:v0.2.0-mod1.3", "user": "agentos" },
+      "cpu": 1000, "memory": 2048 },
+    "env_vars": { "A2X_LLM_KEY": "${A2X_LLM_KEY}" },
+    "mounts": [ { "source": "/data/agent", "target": "/data", "readonly": false } ] }
   ```
-- **输出示例**：
+- **输出示例**（元戎回填后的条目）：
   ```json
-  { "service_id": "generic_3f9a1b2c", "kind": "三方", "framework": "opencode",
+  { "service_id": "user-01+opencode", "kind": "三方", "framework": "opencode",
     "framework_version": "v0.2.0", "address": "10.244.1.7:4096",
     "node": "192.168.0.12", "instance_id": "yr-inst-7f3a92", "user": "user-01",
     "created_at": "2026-07-06T10:00:00Z", "last_active_at": "2026-07-06T10:00:00Z",
     "status": "运行" }
   ```
-  > `service_id` 幂等：同 `service_id` 重发即 upsert 覆盖，`created_at` 保留首次值。`kind` 只接受 `三方` / `九问`，其余值 `400`。`instance_id` 由 gateway 回填、只记录不筛选。
+  > **判模式**：无 `runtime_spec`、带 `node`/`address` 即**模式 A**（仅登记，入参同旧 `RegisterInstanceRequest`）。**并发**：同 `service_id` 在途 → `409 in_progress`；条目已存在且实例存活 → 幂等回现有条目、不二次拉起。**顺序**：元戎成功 → 才写条目；写失败重试 N 次仍失败则报错+记日志。`kind` 只 `三方` / `九问`。
 
 #### 3.2.2 实例变更 / 状态更新
 
@@ -446,11 +455,13 @@ gateway 在落点变化（元戎迁移，`node` / `address` 改变）或**存活
 
 #### 3.2.3 实例删除（用户手动）
 
-Agent 条目**不随实例停止消失**：gateway 停 / 检测到异常只把 `status` 置 `停止` / `异常`（[§3.2.5](#325-存活监控)），条目仍在。删除**由用户经 UI 手动发起**。
+Agent 条目**不随实例停止消失**：`status` 置 `停止` / `异常`（[§3.2.5](#325-存活监控)）时条目仍在。删除**由用户经 UI 手动发起**，同样支持两种模式。
 
-- **接口**：`DELETE /api/instances/{service_id}`（发起方：**用户**）
-- **输入示例**：`DELETE …/instances/generic_3f9a1b2c`
-- **输出示例**：`{ "service_id": "generic_3f9a1b2c", "deleted": true }`（幂等：已删则 `deleted: false`）
+- **接口**：`DELETE /api/instances/{service_id}[?with_runtime=true][&user=&framework=&node=]`（发起方：**用户**）
+- **判模式**：带 `with_runtime=true` → **模式 B**（先按条目 `instance_id` 调元戎 `delete_sandbox`，成功后删条目）；无 → **模式 A**（仅删条目）。
+- **范围**：`{service_id}` = 具体 id 删一个；= `ALL` 删全部，可用 `user`/`framework`/`node` 过滤收窄。批量部分失败**不回滚、逐条报结果**。
+- **输入示例**：`DELETE …/instances/user-01+opencode?with_runtime=true` ／ `DELETE …/instances/ALL?user=user-01`
+- **输出示例**：单个 `{ "service_id": "user-01+opencode", "deleted": true, "runtime_deleted": true }`；ALL/批量 `{ "total": 3, "deleted": 2, "results": [ … ] }`（幂等：已删则 `deleted: false`）
 
 #### 3.2.4 实例查询
 
