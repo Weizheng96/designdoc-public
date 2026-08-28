@@ -146,6 +146,7 @@ flowchart TB
 |------|------|
 | `register_image(name, version, spec, by, **fields) -> dict` | 登记**一行**（该 name 该 version，幂等 upsert）；写 `uploaded_by=by`、`version_key=version_key(version)`（§3.2）、`framework`/`description`/`package_path`/`image_archive_path`/`access_mode` 等；该 name 无默认版本时置 `is_default=1` |
 | `query(filters, size, page) -> (list[dict], int)` | 读版本行、**扁平返回**（一条目 = 一行，`name` / `framework` / `is_default` 为行上普通字段，不分组）；**分页单位 = 行**，返回 `(条目, 过滤后行数)` 供路由写 `X-Total-Count` |
+| `update_image(name, version, fields) -> dict` | **部分更新**可变字段（`framework`/`description`/`package_path`/`image_archive_path`/`runtime_spec`/`access_mode`/`env_vars`/`workspace`/`mounts`）经 `register.patch`；**拒绝改主键 `name`/`version` 与 `is_default`**；不存在则 `404`；返回更新后行 |
 | `deregister(name, version) -> dict` | **先校验无在用实例**（按该行 `framework`+`version` 查 `实例注册表`），无则删镜像仓文件 + **删该版本行**；删的是默认版本则把最新版补为默认 |
 | `set_default(name, version)` / `get_default_version(name) -> str` | 设默认：清该 name 旧 `is_default`、置新版为 1；取默认：`WHERE name=? AND is_default=1`（未设取最新版本）|
 | `resolve_launch_spec(name, version) -> dict` | 组合元戎运行规格（**扁平**）`{name, framework, version, imageurl, access_mode, workdir, mounts, cpu, memory, env}`；经注册管理**按 name+version 精确查一行**、抽取字段 |
@@ -158,6 +159,7 @@ flowchart TB
 | `GET /api/images` | `query`（用户，`?name` / `?framework` / `?uploaded_by` / `?size` / `?page`；分页元数据走响应头）|
 | `GET /api/images/{name}/launch-spec` | `resolve_launch_spec(name, version or get_default_version(name))`（gateway 拉起前查）|
 | `PUT /api/images/{name}/default` | `set_default`（用户）|
+| `PATCH /api/images/{name}/{version}` | `update_image`（用户；部分更新字段，如 `description`）|
 | `DELETE /api/images/{name}/{version}` | `deregister`（用户；在用则 `409`）|
 
 ```python

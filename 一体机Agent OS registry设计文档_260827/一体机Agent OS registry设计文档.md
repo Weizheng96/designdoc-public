@@ -30,6 +30,7 @@
 | | 镜像查询 | 用户 | 列版本行（一条目 = 一行，扁平；支持分页，一页 N 个版本）|
 | | **取运行规格** | gateway | 拉起前按 `name` 查默认版本的元戎运行规格（`launch-spec`）|
 | | 设默认版本 | 用户 | 按 `name` 指定某版本为默认；未设取最新版本 |
+| | 更新字段 | 用户 | 部分更新镜像可变字段（如 `description`）；主键 `name` / `version` 不可改 |
 | | 镜像注销 | 用户 | 校验无在用实例 → 删镜像仓文件 + 删条目 |
 | **实例** | **实例注册** | gateway | 自行拉起后带落点（node / address）写入注册表，`status` 初始 `运行` |
 | | **实例变更** | gateway | 落点变化（元戎迁移）或**状态变化**（置 `停止` / `异常`）时更新条目 |
@@ -371,9 +372,10 @@ gateway 拉起实例**前**查此拿元戎运行规格；不带 `version` 取该
   ```
   > 均为**镜像级**字段，与 `POST /api/images` 登记时的形状一致（`runtime_spec` 原样返回，`access_mode` 供 gateway 选端口 / 命令）；gateway 拉起时再补**实例级**字段（`sandbox_type` / `host_user`=user / `name`=service_id / `lifecycle` / `idle_timeout`）。该 `name` 无默认版本时回退到 `version_key` 最大（最新）的一版。
 
-#### 3.1.4 设默认版本 / 3.1.5 镜像注销
+#### 3.1.4 设默认版本 / 3.1.5 更新字段 / 3.1.6 镜像注销
 
 - **设默认版本**：`PUT /api/images/{name}/default`（用户）。输入 `{ "version": "v0.2.0" }` → 输出 `{ "name": "openclaw", "default": "v0.2.0", "status": "updated" }`。每 `name` 恰有一行 `is_default=1`，改默认即「旧默认清零 + 新默认置一」。
+- **更新字段**：`PATCH /api/images/{name}/{version}`（用户）。**部分更新**可变字段（至少给一个），如 `{ "description": "新描述" }`；可改 `framework` / `description` / `package_path` / `image_archive_path` / `runtime_spec` / `access_mode` / `env_vars` / `workspace` / `mounts`。**主键 `name` / `version` 不可改**，`is_default` 走设默认接口。不存在则 `404`。输出更新后的 `ImageEntry`。
 - **镜像注销**：`DELETE /api/images/{name}/{version}`（用户）。**先校验无在用实例**（按该行 `framework` + `version` 查实例注册表），无则删镜像仓文件 + 删该版本条目；有在用则 `409`（响应体带 `code: image_in_use` 与在用实例列表）。删掉的若是默认版本，则把剩余版本中最新的一版自动提升为默认。输出 `{ "name": "openclaw", "version": "v0.2.0", "status": "deregistered" }`。
 
 ### 3.2 实例管理

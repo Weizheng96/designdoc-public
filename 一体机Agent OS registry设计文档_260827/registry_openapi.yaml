@@ -157,6 +157,24 @@ paths:
         required: true
         description: 镜像版本 version
         schema: { type: string, example: v0.2.0 }
+    patch:
+      tags: [images]
+      summary: 更新镜像字段（部分更新；不含主键 name/version 与 is_default）
+      description: 部分更新一行镜像的可变字段（如 description）；至少给一个字段；主键 name/version 不可改，默认版本走 PUT …/default。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateImageRequest' }
+            example: { description: "更新后的描述", package_path: "/new/path/" }
+      responses:
+        '200':
+          description: 已更新（返回更新后的行）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImageEntry' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
     delete:
       tags: [images]
       summary: 注销镜像（按 name + version；校验无在用实例 → 删镜像仓文件 + 删条目）
@@ -577,6 +595,28 @@ components:
         mounts: { type: array, items: { $ref: '#/components/schemas/Mount' } }
         uploaded_by: { type: string, example: user-01 }
         created_at: { type: string, format: date-time, example: "2026-07-06T10:00:00Z" }
+    UpdateImageRequest:
+      type: object
+      description: >
+        镜像字段部分更新（PATCH …/images/{name}/{version}）；至少给一个字段。
+        **不含主键** `name` / `version`；`is_default` 走 `PUT …/default`、不在此改。
+      properties:
+        framework: { type: string, description: 展示字段, example: openclaw }
+        description: { type: string, example: "更新后的描述" }
+        package_path: { type: string, example: /new/path/ }
+        image_archive_path: { type: string, example: /new/archive/ }
+        runtime_spec:
+          type: object
+          additionalProperties: true
+          description: 运行规格（不透明 JSON，整体替换）
+        access_mode:
+          type: array
+          items: { $ref: '#/components/schemas/AccessMode' }
+        env_vars:
+          type: object
+          additionalProperties: { type: string }
+        workspace: { type: string, example: /app }
+        mounts: { type: array, items: { $ref: '#/components/schemas/Mount' } }
     AccessMode:
       type: object
       description: 一种接入方式（如 tui / web）
